@@ -1,0 +1,13 @@
+version: '3'
+services:
+  homeassistant:
+    container_name: homeassistant_wican
+    image: "ghcr.io/home-assistant/home-assistant:stable"
+    volumes:
+      - ./config:/config
+      - /etc/localtime:/etc/localtime:ro
+      - /run/dbus:/run/dbus:ro
+      - ./custom_components/wican:/config/custom_components/wican/
+    restart: unless-stopped
+    privileged: true
+    network_mode: host

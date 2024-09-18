@@ -1,0 +1,5 @@
+#HA Config folder
+config/
+
+#PY Cache
+custom_components/wican/__pycache__/*
