@@ -21,9 +21,34 @@ class WiCan:
         return result.status == 200 and result.data['protocol'] == "auto_pid"
 
     async def check_status(self):
-        result = await self.call("/check_status")
+        try:
+            result = await self.call("/check_status")
+        except:
+            return False
 
-        result.data['mac'] = 'abc123'
+        if(not result.status == 200):
+            return False
+        
+        return result.data
+
+    async def get_pid(self):
+        try:
+            result = await self.call("/autopid_data")
+        except:
+            _LOGGER.warning("AUTO PID FAILED")
+
+        return {
+            "SOC": {
+                "value": 80.5,
+                "class": "battery",
+                "unit": "%"
+            },
+            "aux_volts": {
+                "value": 12.8,
+                "class": "voltage",
+                "unit": "V",
+            }
+        }
 
         if(not result.status == 200):
             return False
