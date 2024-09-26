@@ -108,7 +108,7 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
 def device_info(coordinator):
     return {
         "identifiers": {(DOMAIN, coordinator.data['status']['device_id'])},
-        "name": "WiCan",
+        "name": "WiCAN",
         "manufacturer": "MeatPi",
         "model": coordinator.data['status']['hw_version'],
         "configuration_url": "http://" + coordinator.data['status']['sta_ip'],
@@ -196,7 +196,7 @@ class WiCanCoordinator(DataUpdateCoordinator):
         super().__init__(
             hass,
             _LOGGER,
-            name="WiCan Coordinator",
+            name="WiCAN Coordinator",
             update_interval = timedelta(seconds=30)
         )
 
