@@ -1,6 +1,6 @@
 {
     "domain": "wican",
-    "name": "WiCan",
+    "name": "WiCAN",
     "dependencies": ["http"],
     "codeowners": ["@jay-oswald"],
     "version": "0.1.2",
