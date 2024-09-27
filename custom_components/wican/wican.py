@@ -43,6 +43,8 @@ class WiCan:
 
         result = {};
         for key in pid_meta.data:
+            if not key in pid_data.data:
+                return False
             result[key] = pid_meta.data[key]
             result[key]["value"] = pid_data.data[key]
 
