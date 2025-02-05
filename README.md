@@ -5,16 +5,16 @@ This is the official HomeAssistant integration for [WiCAN by meatpi](https://git
 
 This integration is available via HACS, and not part of the default HomeAssistant integrations. 
 
-# WiCAN Documentation
-The setup of WiCAN devices (e.g. WiCAN OBD or WiCAN USB) can be found in the offical [WiCAN Documentation](https://meatpihq.github.io/wican-fw/).
+# Documentation
+This repository contains only documentation for the HomeAssistant integration of WiCAN.
 
+The documentation for the devices (e.g. WiCAN OBD or WiCAN USB) can be found in the offical [WiCAN Device Documentation](https://meatpihq.github.io/wican-fw/).
 There you will also find configuration instructions for the device itself (e.g. Firmware Updates / Retrieving data for your specific car model) 
 
 # Integration Status
 It is very much in an Alpha stage at the moment, and under constant changes, hoping to get it in a Beta state soon where we could recommend starting to use it.
 
 # Installation
-(see also: [WiCAN Documentation - Integration Setup](https://meatpihq.github.io/wican-fw/home-assistant/integration_setup) )
 
 ## Manual Installation
 1. Add the integration repository to HACS and install the WiCAN integration.
