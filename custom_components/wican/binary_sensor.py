@@ -1,3 +1,8 @@
+"""Binary sensor processing for WiCAN Integration.
+
+Purpose: provide binary sensor data for available WiCAN sensors.
+"""
+
 from .const import DOMAIN
 from .entity import WiCanStatusEntity, WiCanPidEntity
 
@@ -7,10 +12,41 @@ from homeassistant.const import EntityCategory, STATE_ON, STATE_OFF
 
 
 def binary_state(target_state: str):
+    """Check binary state for provided str.
+
+    Parameters
+    ----------
+    target_state : str
+        state to be checked.
+
+    Returns
+    -------
+    lambda:
+        returns homeassistant const STATE_ON or STATE_OFF based on provided input.
+
+    """
+
     return lambda state: STATE_ON if state == target_state else STATE_OFF
 
 
 async def async_setup_entry(hass, entry, async_add_entities):
+    """Create and provide list of binary sensors containing WiCanStatusEntities and WiCanPidEntities.
+
+    Parameters
+    ----------
+    hass : any
+        HomeAssistant object for coordinator.
+    entry: any
+        WiCAN entry in HomeAssistant data for coordinator.
+    async_add_entities: any
+        Object to be called with list of WiCanEntities.
+
+    Returns
+    -------
+    async_add_entities: function:
+        Calls function async_add_entities containing newly created list of WiCanEntities.
+
+    """
     coordinator = hass.data[DOMAIN][entry.entry_id]
 
     entities = []

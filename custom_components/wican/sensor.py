@@ -1,3 +1,8 @@
+"""Sensor processing for WiCAN Integration.
+
+Purpose: provide sensor data for available WiCAN sensors.
+"""
+
 import logging
 from homeassistant.components.number import NumberEntity, NumberDeviceClass
 
@@ -13,10 +18,40 @@ _LOGGER = logging.getLogger(__name__)
 
 
 def process_status_voltage(i):
+    """Convert status voltage to type float.
+
+    Parameters
+    ----------
+    i : Any
+        Voltage value.
+
+    Returns
+    -------
+    float:
+        Voltage value converted to type float.
+
+    """
     return float(i[:-1])
 
 
 async def async_setup_entry(hass, entry, async_add_entities):
+    """Create and provide list of sensors containing WiCanStatusEntities and WiCanPidEntities.
+
+    Parameters
+    ----------
+    hass : Any
+        HomeAssistant object for coordinator.
+    entry: Any
+        WiCAN entry in HomeAssistant data for coordinator.
+    async_add_entities: Any
+        Object to be called with list of WiCanEntities.
+
+    Returns
+    -------
+    async_add_entities: method:
+        Calls function async_add_entities containing newly created list of WiCanEntities.
+
+    """
     coordinator = hass.data[DOMAIN][entry.entry_id]
 
     entities = []
