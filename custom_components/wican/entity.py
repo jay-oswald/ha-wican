@@ -45,7 +45,7 @@ class WiCanEntityBase(CoordinatorEntity):
 
     def set_state(self):
         new_state = self.get_new_state()
-        if not new_state:
+        if new_state is None:
             return
 
         if self.process_state is not None:
