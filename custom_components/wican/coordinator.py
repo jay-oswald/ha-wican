@@ -1,4 +1,4 @@
-"""Coordinator for WiCAN Integration.
+"""Coordinator for WiCan Integration.
 
 Purpose: Coordinate data update for WiCAN devices.
 """
@@ -15,21 +15,22 @@ _LOGGER = logging.getLogger(__name__)
 
 
 class WiCanCoordinator(DataUpdateCoordinator):
-    """WiCAN Coordinator class.
+    """WiCAN Coordinator class based on HomeAssistant DataUpdateCoordinator.
 
     Attributes
     ----------
-    hass: Any
-        HomeAssistant object.
     api: Any
-        WiCAN api to be used.
+        WiCan device api to be used.
+    data: dict
+        Inherited from DataUpdateCoordinator.
+        dict is created and filled from WiCan API with first call of method "_async_update_data".
 
     """
 
     ecu_online = False
 
     def __init__(self, hass, api):
-        """Initialize a WiCanCoordinator via HomeAssistant DataUpdateCoordinator."""
+        """Initialize a WiCanCoordinator and set the WiCan device API."""
         super().__init__(
             hass,
             _LOGGER,
@@ -43,12 +44,13 @@ class WiCanCoordinator(DataUpdateCoordinator):
         return await self.get_data()
 
     async def get_data(self):
-        """Check, if WiCan API is available and return data dictionary containing status and PIDs.
+        """Check, if WiCan API is available and return data dictionary containing car configuration and data (PIDs) using the WiCan API.
 
         Returns
         -------
         data: dict
-            Dictionary containing API status and PIDs.
+            Dictionary containing WiCan device status, car configuration and data (PIDs).
+            If device API is not reachable, return an empty dict.
 
         """
         data = {}
@@ -69,12 +71,12 @@ class WiCanCoordinator(DataUpdateCoordinator):
         return data
 
     def device_info(self):
-        """Return device information for HomeAssistant.
+        """Return basic device information shown in HomeAssistant "Device Info" section of the WiCan device.
 
         Returns
         -------
         dict
-            Dictionary containing details about the device (e.g. configuration URL, software version).
+            Dictionary containing details about the device (e.g. Device URL, Software Version).
 
         """
         return {
@@ -88,7 +90,7 @@ class WiCanCoordinator(DataUpdateCoordinator):
         }
 
     def available(self) -> bool:
-        """Check, if WiCan device is available.
+        """Check, if WiCan device is available, based on the data received from earlier API calls.
 
         Returns
         -------
@@ -99,18 +101,18 @@ class WiCanCoordinator(DataUpdateCoordinator):
         return self.data["status"] != False
 
     def get_status(self, key) -> str | bool:
-        """Check, if device status is available and get status-value for a given key.
+        """Check, if device status is available from previous API call and get status-value for a given key.
 
         Parameters
         ----------
         key: Any
-            Status key to be checked.
+            Status key to be checked (e.g. "fw_version").
 
         Returns
         -------
         str | bool:
-            False, if no device status available.
             str containing status-value, if device status is available.
+            False, if no device status available.
 
         """
         if not self.data["status"]:
@@ -119,18 +121,18 @@ class WiCanCoordinator(DataUpdateCoordinator):
         return self.data["status"][key]
 
     def get_pid_value(self, key) -> str | bool:
-        """Check, if device status is available and get pid-value for a given key.
+        """Check, if device status is available from previous API call and get value for a given PID-key.
 
         Parameters
         ----------
         key: Any
-            PID-key to be checked.
+            PID-key (e.g. "SOC_BMS") to be checked for available data.
 
         Returns
         -------
         str | bool
             False, if no device status available.
-            str containing pid-value, if device status is available.
+            str containing value of PID, if device status is available.
 
         """
         if not self.data["status"]:

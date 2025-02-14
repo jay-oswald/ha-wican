@@ -42,7 +42,7 @@ async def async_setup_entry(hass, entry, async_add_entities):
     hass : Any
         HomeAssistant object for coordinator.
     entry: Any
-        WiCAN entry in HomeAssistant data for coordinator.
+        WiCan entry in HomeAssistant data for coordinator.
     async_add_entities: Any
         Object to be called with list of WiCanEntities.
 
