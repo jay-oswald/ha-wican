@@ -71,11 +71,17 @@ class WiCanEntityBase(CoordinatorEntity):
 
     @property
     def unit_of_measurement(self):
-        return self.get_data("unit")
+        if self.get_data("unit") == "none":
+            return None
+        else:
+            return self.get_data("unit")
 
     @property
     def device_class(self):
-        return self.get_data("class")
+        if self.get_data("class") == "none":
+            return None
+        else:
+            return self.get_data("class")
 
 
 class WiCanStatusEntity(WiCanEntityBase):
