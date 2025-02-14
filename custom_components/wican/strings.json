@@ -3,9 +3,9 @@
         "step": {
             "user": {
                 "title": "Config for WiCAN Integration",
-                "description": "Please make sure you are using a static IP address for your WiCAN, we do not support dynamic IP addresses yet.",
+                "description": "Enter the IP-Address for your WiCAN device. The IP-Address should be static or fixed in your router to avoid connection issues. Please also make sure your protocol is also set to 'auto_pid'. If you need help setting it up, you can find it here: https://github.com/jay-oswald/ha-wican",
                 "data": {
-                    "ip": "IP Address"
+                    "ip": "WiCAN IP-Address"
                 }
             }
         }
