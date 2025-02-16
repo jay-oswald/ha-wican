@@ -1,5 +1,10 @@
 {
     "config": {
+        "error": {
+            "invalid_config": "Failed validation, double check the IP, as well as check if you have protocol set to auto_pid",
+            "cannot_connect": "WiCAN Connection error, are you sure the IP is correct?",
+            "unknown": "WiCAN not validated, unknown error"
+        },
         "step": {
             "user": {
                 "title": "Config for WiCAN Integration",

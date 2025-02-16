@@ -1,5 +1,10 @@
 {
     "config": {
+        "error": {
+            "invalid_config": "Validierung fehlgeschlagen. Prüfe bitte die IP-Adresse und stelle sicher, dass das WiCAN Protokoll auf 'auto_pid' eingestellt ist.",
+            "cannot_connect": "WiCAN Verbindungsfehler. Prüfe bitte die IP-Adresse.",
+            "unknown": "Validierung fehlgeschlagen. Unbekannter Fehler."
+        },
         "step": {
             "user": {
                 "title": "WiCAN Integration",
