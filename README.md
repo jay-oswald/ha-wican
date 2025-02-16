@@ -38,4 +38,22 @@ It is very much in an Alpha stage at the moment, and under constant changes, hop
 
 Result: After completing installation and configuration, WiCAN will be connected to Home Assistant, and you will be able to monitor the available car parameters directly from the Home Assistant interface.
 
-If you don't see data right away make sure to switch on ignition in your car to get access for WiCAN to the CAN-bus data. 
+# Troubleshooting
+### Not possible to add a device via IP-Address or mDNS/hostname
+Potential root cause: The WiCAN device might not be accessible or the protocol is not set to "AutoPID".
+
+To fix the issue:
+1. Please make sure that the WiCAN device is accesssible from your web browser. If it is not available, ensure that it is not in sleep mode [WiCAN Docs: Sleep Mode](https://meatpihq.github.io/wican-fw/config/sleep-mode)
+2. Please make sure that the WiCAN device uses protocol "AutoPID" via the WiCAN device settings.
+
+### The device is added, but all entites show status "Unavailable"
+Potential root cause: HomeAssistant has been restarted or the WiCAN integration reloaded while the WiCAN device was not available (e.g. car away, sleep mode).
+
+To fix the issue, make sure, the WiCAN device is available (e.g. by turning on ignition of car) and then reload the integration.
+
+### Device entities are not properly updated anymore after changing the car configuration on the WiCAN device
+Potential root cause: The WiCAN integration creates entities based on the car configuration in HomeAssistant. By changing the car configuration, some PIDs might get added and others removed.
+
+To ensure, that all entities in HomeAssistant are up to date after changing the car configuration, you can either
+* delete inidividual entities, that are not available in the new car configuration OR
+* delete the WiCAN device in HomeAssistant and afterwards add it again with the new car configuration. 
