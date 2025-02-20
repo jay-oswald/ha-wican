@@ -95,7 +95,14 @@ async def async_setup_entry(hass, entry, async_add_entities):
         return async_add_entities(entities)
 
     for key in coordinator.data["pid"]:
-        if coordinator.data["pid"][key]["sensor_type"] != "binary_sensor":
+        append = False
+        if coordinator.data["pid"][key].get("sensor_type") is not None:
+            if coordinator.data["pid"][key]["sensor_type"] != "binary_sensor":
+                append = True
+        else:
+            append = True
+
+        if append:
             entities.append(
                 WiCanPidEntity(
                     coordinator,
