@@ -1,24 +1,29 @@
 import aiohttp
 import logging
+
 _LOGGER = logging.getLogger(__name__)
 
-class WiCan:
-    ip = "";
-    def __init__(self, ip):
-        self.ip = ip;
 
-    async def call(self, endpoint, params = {}, method="get"):
+class WiCan:
+    ip = ""
+
+    def __init__(self, ip):
+        self.ip = ip
+
+    async def call(self, endpoint, params={}, method="get"):
         match method:
             case "get":
                 async with aiohttp.ClientSession() as session:
-                    async with session.get("http://" + self.ip + endpoint, params=params) as resp:
+                    async with session.get(
+                        "http://" + self.ip + endpoint, params=params
+                    ) as resp:
                         resp.data = await resp.json(content_type=None)
                         return resp
 
     async def test(self) -> bool:
         result = await self.call("/check_status")
-        
-        return result.status == 200 and result.data['protocol'] == "auto_pid"
+
+        return result.status == 200 and result.data["protocol"] == "auto_pid"
 
     async def check_status(self):
         try:
@@ -26,9 +31,9 @@ class WiCan:
         except:
             return False
 
-        if(not result.status == 200):
+        if not result.status == 200:
             return False
-        
+
         return result.data
 
     async def get_pid(self):
@@ -41,11 +46,10 @@ class WiCan:
         if not isinstance(pid_meta.data, dict):
             return False
 
-        result = {};
+        result = {}
         for key in pid_meta.data:
             result[key] = pid_meta.data[key]
             value = pid_data.data[key] if key in pid_data.data else False
             result[key]["value"] = value
 
         return result
-
