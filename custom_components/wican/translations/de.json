@@ -14,5 +14,10 @@
                 }
             }
         }
+    },
+    "exceptions": {
+        "cannot_connect": {
+            "message": "WiCAN Gerät aktuell nicht erreichbar."
+        }
     }
 }

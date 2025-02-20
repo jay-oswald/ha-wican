@@ -30,7 +30,9 @@ class WiCanCoordinator(DataUpdateCoordinator):
         data = {}
         data["status"] = await self.api.check_status()
         if data["status"] == False:
-            raise ConfigEntryNotReady("cannot_connect")
+            raise ConfigEntryNotReady(
+                translation_domain=DOMAIN, translation_key="cannot_connect"
+            )
 
         self.ecu_online = True
         # self.ecu_online = data['status']['ecu_status'] == 'online'
