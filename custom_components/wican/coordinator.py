@@ -6,7 +6,7 @@ from homeassistant.helpers.update_coordinator import (
 )
 from homeassistant.exceptions import ConfigEntryNotReady
 
-from .const import DOMAIN
+from .const import DOMAIN, CONF_DEFAULT_SCAN_INTERVAL
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -17,7 +17,8 @@ class WiCanCoordinator(DataUpdateCoordinator):
     def __init__(self, hass, config_entry, api):
         SCAN_INTERVAL = timedelta(
             seconds=config_entry.options.get(
-                CONF_SCAN_INTERVAL, config_entry.data.get(CONF_SCAN_INTERVAL, 5)
+                CONF_SCAN_INTERVAL,
+                config_entry.data.get(CONF_SCAN_INTERVAL, CONF_DEFAULT_SCAN_INTERVAL),
             )
         )
         super().__init__(
