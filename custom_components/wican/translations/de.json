@@ -17,7 +17,7 @@
     },
     "exceptions": {
         "cannot_connect": {
-            "message": "WiCAN Gerät aktuell nicht erreichbar."
+            "message": "WiCAN Gerät aktuell nicht erreichbar. IP-Adresse: {ip_address}"
         }
     }
 }
