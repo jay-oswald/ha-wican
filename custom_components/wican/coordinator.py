@@ -3,6 +3,7 @@ from datetime import timedelta
 from homeassistant.helpers.update_coordinator import (
     DataUpdateCoordinator,
 )
+from homeassistant.exceptions import ConfigEntryNotReady
 
 from .const import DOMAIN
 
@@ -29,7 +30,7 @@ class WiCanCoordinator(DataUpdateCoordinator):
         data = {}
         data["status"] = await self.api.check_status()
         if data["status"] == False:
-            return data
+            raise ConfigEntryNotReady("cannot_connect")
 
         self.ecu_online = True
         # self.ecu_online = data['status']['ecu_status'] == 'online'
