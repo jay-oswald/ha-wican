@@ -56,4 +56,12 @@ Potential root cause: The WiCAN integration creates entities based on the car co
 
 To ensure, that all entities in HomeAssistant are up to date after changing the car configuration, you can either
 * delete inidividual entities, that are not available in the new car configuration OR
-* delete the WiCAN device in HomeAssistant and afterwards add it again with the new car configuration. 
+* delete the WiCAN device in HomeAssistant and afterwards add it again with the new car configuration.
+
+### The Unit of measure of a device entity cannot be changed in HomeAssistant
+Background: The WiCAN HomeAssistant integration creates entities based on the WiCAN car configuration.
+
+To change the unit of measure of an entity in HomeAssistant, it needs to be updated in the WiCAN device itself:
+* Open the WiCAN device in a web-browser (e.g. via link "VISIT" from the WiCAN device page in HomeAssistant)
+* Go to tab "Automate", find the respective PID, update the "unit" and press "Submit changes". Further details about the car configuration are part of the official WiCAN device documentation: [Automate](https://meatpihq.github.io/wican-fw/config/automate/usage)
+* After changing the unit on the WiCAN device, go to HomeAssistant and reload the WiCAN integration. This will automatically update the unit of measure for the respective entity.
