@@ -29,7 +29,7 @@ class WiCanCoordinator(DataUpdateCoordinator):
     async def get_data(self):
         data = {}
         data["status"] = await self.api.check_status()
-        if data["status"] == False:
+        if not data["status"]:
             raise ConfigEntryNotReady("cannot_connect")
 
         self.ecu_online = True
@@ -66,6 +66,9 @@ class WiCanCoordinator(DataUpdateCoordinator):
 
     def get_pid_value(self, key) -> str | bool:
         if not self.data["status"]:
+            return False
+
+        if self.data["pid"].get("key") is None:
             return False
 
         return self.data["pid"][key]["value"]
