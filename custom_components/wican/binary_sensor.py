@@ -3,12 +3,11 @@
 Purpose: provide binary sensor data for available WiCAN sensors.
 """
 
+from homeassistant.const import STATE_OFF, STATE_ON, EntityCategory
+from homeassistant.core import HomeAssistant
+
 from .const import DOMAIN
-from .entity import WiCanStatusEntity, WiCanPidEntity
-
-from homeassistant.components.binary_sensor import BinarySensorDeviceClass
-
-from homeassistant.const import EntityCategory, STATE_ON, STATE_OFF
+from .entity import WiCanPidEntity, WiCanStatusEntity
 
 
 def binary_state(target_state: str):
@@ -29,12 +28,12 @@ def binary_state(target_state: str):
     return lambda state: STATE_ON if state == target_state else STATE_OFF
 
 
-async def async_setup_entry(hass, entry, async_add_entities):
+async def async_setup_entry(hass: HomeAssistant, entry, async_add_entities):
     """Create and provide list of binary sensors containing WiCanStatusEntities and WiCanPidEntities.
 
     Parameters
     ----------
-    hass : any
+    hass : HomeAssistant
         HomeAssistant object for coordinator.
     entry: any
         WiCAN entry in HomeAssistant data for coordinator.
@@ -50,8 +49,8 @@ async def async_setup_entry(hass, entry, async_add_entities):
     coordinator = hass.data[DOMAIN][entry.entry_id]
 
     entities = []
-    if coordinator.data["status"] == False:
-        return
+    if not coordinator.data["status"]:
+        return None
 
     entities.append(
         WiCanStatusEntity(

@@ -1,7 +1,8 @@
 """Communicate with WiCAN device HTTP-API via available endpoints."""
 
-import aiohttp
 import logging
+
+import aiohttp
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -18,11 +19,11 @@ class WiCan:
 
     ip = ""
 
-    def __init__(self, ip):
+    def __init__(self, ip) -> None:
         """Initialize the WiCan API integration with the device IP / name."""
         self.ip = ip
 
-    async def call(self, endpoint, params={}, method="get"):
+    async def call(self, endpoint, params=None, method="get"):
         """Call WiCan device HTTP-API endpoint and provide response.
 
         Parameters
@@ -40,6 +41,8 @@ class WiCan:
             Response of the WiCan API for the given endpoint.
 
         """
+        if params is None:
+            params = {}
         match method:
             case "get":
                 async with aiohttp.ClientSession() as session:
@@ -76,7 +79,7 @@ class WiCan:
         except:
             return False
 
-        if not result.status == 200:
+        if result.status != 200:
             return False
 
         return result.data

@@ -1,13 +1,14 @@
 """Initialize WiCan Integration."""
 
 import logging
-from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
-from .wican import WiCan
-from .const import DOMAIN
-from homeassistant.const import CONF_IP_ADDRESS, Platform
 
+from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import CONF_IP_ADDRESS, Platform
+from homeassistant.core import HomeAssistant
+
+from .const import DOMAIN
 from .coordinator import WiCanCoordinator
+from .wican import WiCan
 
 PLATFORMS: list[str] = [Platform.BINARY_SENSOR, Platform.SENSOR]
 _LOGGER = logging.getLogger(__name__)
@@ -32,7 +33,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     wican = WiCan(entry.data[CONF_IP_ADDRESS])
 
-    coordinator = WiCanCoordinator(hass, wican)
+    coordinator = WiCanCoordinator(hass, entry, wican)
 
     await coordinator.async_config_entry_first_refresh()
 

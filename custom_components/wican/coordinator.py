@@ -3,14 +3,15 @@
 Purpose: Coordinate data update for WiCAN devices.
 """
 
-import logging
 from datetime import timedelta
-from homeassistant.helpers.update_coordinator import (
-    DataUpdateCoordinator,
-)
-from homeassistant.exceptions import ConfigEntryNotReady
+import logging
 
-from .const import DOMAIN
+from homeassistant.const import CONF_SCAN_INTERVAL
+from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import ConfigEntryNotReady
+from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
+
+from .const import CONF_DEFAULT_SCAN_INTERVAL, DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -30,15 +31,17 @@ class WiCanCoordinator(DataUpdateCoordinator):
 
     ecu_online = False
 
-    def __init__(self, hass, api):
+    def __init__(self, hass: HomeAssistant, config_entry, api) -> None:
         """Initialize a WiCanCoordinator and set the WiCan device API."""
-        super().__init__(
-            hass,
-            _LOGGER,
-            name="WiCAN Coordinator",
-            update_interval=timedelta(seconds=30),
+        SCAN_INTERVAL = timedelta(
+            seconds=config_entry.options.get(
+                CONF_SCAN_INTERVAL,
+                config_entry.data.get(CONF_SCAN_INTERVAL, CONF_DEFAULT_SCAN_INTERVAL),
+            )
         )
-
+        super().__init__(
+            hass, _LOGGER, name="WiCAN Coordinator", update_interval=SCAN_INTERVAL
+        )
         self.api = api
 
     async def _async_update_data(self):
@@ -56,7 +59,7 @@ class WiCanCoordinator(DataUpdateCoordinator):
         """
         data = {}
         data["status"] = await self.api.check_status()
-        if data["status"] == False:
+        if not data["status"]:
             raise ConfigEntryNotReady("cannot_connect")
 
         self.ecu_online = True
@@ -137,6 +140,9 @@ class WiCanCoordinator(DataUpdateCoordinator):
 
         """
         if not self.data["status"]:
+            return False
+
+        if self.data["pid"].get("key") is None:
             return False
 
         return self.data["pid"][key]["value"]

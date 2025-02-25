@@ -4,15 +4,13 @@ Purpose: provide sensor data for available WiCAN sensors.
 """
 
 import logging
-from homeassistant.components.number import NumberEntity, NumberDeviceClass
 
-from homeassistant.const import (
-    EntityCategory,
-)
-from homeassistant.helpers.entity import EntityCategory
+from homeassistant.components.number import NumberDeviceClass
+from homeassistant.const import EntityCategory
+from homeassistant.core import HomeAssistant
 
 from .const import DOMAIN
-from .entity import WiCanStatusEntity, WiCanPidEntity
+from .entity import WiCanPidEntity, WiCanStatusEntity
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -34,12 +32,12 @@ def process_status_voltage(i):
     return float(i[:-1])
 
 
-async def async_setup_entry(hass, entry, async_add_entities):
+async def async_setup_entry(hass: HomeAssistant, entry, async_add_entities):
     """Create and provide list of sensors containing WiCanStatusEntities and WiCanPidEntities.
 
     Parameters
     ----------
-    hass : Any
+    hass : HomeAssistant
         HomeAssistant object for coordinator.
     entry: Any
         WiCan entry in HomeAssistant data for coordinator.
@@ -55,8 +53,8 @@ async def async_setup_entry(hass, entry, async_add_entities):
     coordinator = hass.data[DOMAIN][entry.entry_id]
 
     entities = []
-    if coordinator.data["status"] == False:
-        return
+    if not coordinator.data["status"]:
+        return None
 
     entities.append(
         WiCanStatusEntity(

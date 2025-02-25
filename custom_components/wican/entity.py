@@ -1,11 +1,7 @@
 """Different types of WiCan entities based on DataUpdateCoordinator entities."""
 
 from homeassistant.core import callback
-from homeassistant.const import STATE_ON, STATE_OFF
-from homeassistant.components.binary_sensor import BinarySensorEntity
-from homeassistant.helpers.update_coordinator import (
-    CoordinatorEntity,
-)
+from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .coordinator import WiCanCoordinator
 
@@ -31,7 +27,7 @@ class WiCanEntityBase(CoordinatorEntity):
     _attr_has_entity_name = True
     _attr_name = None
 
-    def __init__(self, coordinator, data, process_state=None):
+    def __init__(self, coordinator, data, process_state=None) -> None:
         """Initialize a WiCanEntity with data, coordinator, process_state and identifiers for HomeAssistant."""
         super().__init__(coordinator)
         self.data = data
@@ -147,7 +143,7 @@ class WiCanEntityBase(CoordinatorEntity):
 class WiCanStatusEntity(WiCanEntityBase):
     """WiCan Status Entity based on WiCanEntityBase."""
 
-    def __init__(self, coordinator, data, process_state=None):
+    def __init__(self, coordinator, data, process_state=None) -> None:
         """Initialize the status entity same as WiCanEntityBase."""
         super().__init__(coordinator, data, process_state)
 
@@ -172,7 +168,7 @@ class WiCanStatusEntity(WiCanEntityBase):
 class WiCanPidEntity(WiCanEntityBase):
     """WiCan Data Entity based on WiCanEntityBase."""
 
-    def __init__(self, coordinator, data, process_state=None):
+    def __init__(self, coordinator, data, process_state=None) -> None:
         """Initialize the data entity same as WiCanEntityBase."""
         super().__init__(coordinator, data, process_state)
 
@@ -195,6 +191,7 @@ class WiCanPidEntity(WiCanEntityBase):
 
     @property
     def available(self) -> bool:
+        """Provide availability of the entity."""
         if self._state is False:
             return False
 

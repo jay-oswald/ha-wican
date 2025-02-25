@@ -5,7 +5,18 @@
                 "title": "Config for WiCAN Integration",
                 "description": "Please make sure you are using a static IP address for your WiCAN, we do not support dynamic IP addresses yet.",
                 "data": {
-                    "ip": "IP Address"
+                    "ip": "IP Address",
+                    "scan_interval": "Polling Interval in seconds [min: 5sec]"
+                }
+            }
+        }
+    },
+    "options": {
+        "step": {
+            "init": {
+                "title": "Config for WiCAN Integration",
+                "data": {
+                    "scan_interval": "Polling Interval in seconds [min: 5sec]"
                 }
             }
         }
