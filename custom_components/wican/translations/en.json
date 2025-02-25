@@ -8,9 +8,20 @@
         "step": {
             "user": {
                 "title": "Config for WiCAN Integration",
-                "description": "Enter the IP-Address for your WiCAN device. The IP-Address should be static or fixed in your router to avoid connection issues. Please also make sure your protocol is also set to 'auto_pid'. If you need help setting it up, you can find it here: https://github.com/jay-oswald/ha-wican",
+                "description": "Enter the IP-Address for your WiCAN device. It should be static or fixed in your router to avoid connection issues. Please also make sure your protocol is set to 'auto_pid'. If you need help setting it up, you can find it here: https://github.com/jay-oswald/ha-wican",
                 "data": {
-                    "ip_address": "WiCAN IP-Address"
+                    "ip_address": "WiCAN IP-Address",
+                    "scan_interval": "Polling Interval in seconds [min: 5sec]"
+                }
+            }
+        }
+    },
+    "options": {
+        "step": {
+            "init": {
+                "title": "Config for WiCAN Integration",
+                "data": {
+                    "scan_interval": "Polling Interval in seconds [min: 5sec]"
                 }
             }
         }

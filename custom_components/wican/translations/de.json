@@ -10,7 +10,18 @@
                 "title": "WiCAN Integration",
                 "description": "Trage die IP-Adresse des WiCAN Geräts ein. Sie sollte statisch oder im Router festgelegt sein, um Verbindungsprobleme zu vermeiden. Stelle bitte auch sicher, dass WiCAN als Protokoll 'auto_pid' verwendet. Falls du bei der Einrichtung Hilfe benötigst, findest du sie hier: https://github.com/jay-oswald/ha-wican.",
                 "data": {
-                    "ip_address": "WiCAN IP-Adresse"
+                    "ip_address": "WiCAN IP-Adresse",
+                    "scan_interval": "Aktualisierungsinterval in Sekunden [min: 5 Sek.]"
+                }
+            }
+        }
+    },
+    "options": {
+        "step": {
+            "init": {
+                "title": "WiCAN Integration",
+                "data": {
+                    "scan_interval": "Aktualisierungsinterval in Sekunden [min: 5 Sek.]"
                 }
             }
         }
