@@ -5,7 +5,18 @@
                 "title": "Config for WiCAN Integration",
                 "description": "Enter the IP Address for your WiCAN. Please make sure your protocol is also set to auto_pid",
                 "data": {
-                    "ip": "WiCAN IP"
+                    "ip": "WiCAN IP",
+                    "scan_interval": "Polling Interval in seconds [min: 5sec]"
+                }
+            }
+        }
+    },
+    "options": {
+        "step": {
+            "init": {
+                "title": "Config for WiCAN Integration",
+                "data": {
+                    "scan_interval": "Polling Interval in seconds [min: 5sec]"
                 }
             }
         }

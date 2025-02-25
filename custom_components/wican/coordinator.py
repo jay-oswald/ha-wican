@@ -1,11 +1,12 @@
 import logging
 from datetime import timedelta
+from homeassistant.const import CONF_SCAN_INTERVAL
 from homeassistant.helpers.update_coordinator import (
     DataUpdateCoordinator,
 )
 from homeassistant.exceptions import ConfigEntryNotReady
 
-from .const import DOMAIN
+from .const import DOMAIN, CONF_DEFAULT_SCAN_INTERVAL
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -13,14 +14,16 @@ _LOGGER = logging.getLogger(__name__)
 class WiCanCoordinator(DataUpdateCoordinator):
     ecu_online = False
 
-    def __init__(self, hass, api):
-        super().__init__(
-            hass,
-            _LOGGER,
-            name="WiCAN Coordinator",
-            update_interval=timedelta(seconds=30),
+    def __init__(self, hass, config_entry, api):
+        SCAN_INTERVAL = timedelta(
+            seconds=config_entry.options.get(
+                CONF_SCAN_INTERVAL,
+                config_entry.data.get(CONF_SCAN_INTERVAL, CONF_DEFAULT_SCAN_INTERVAL),
+            )
         )
-
+        super().__init__(
+            hass, _LOGGER, name="WiCAN Coordinator", update_interval=SCAN_INTERVAL
+        )
         self.api = api
 
     async def _async_update_data(self):

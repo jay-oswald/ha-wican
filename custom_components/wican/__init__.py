@@ -14,7 +14,7 @@ _LOGGER = logging.getLogger(__name__)
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     wican = WiCan(entry.data[CONF_IP_ADDRESS])
 
-    coordinator = WiCanCoordinator(hass, wican)
+    coordinator = WiCanCoordinator(hass, entry, wican)
 
     await coordinator.async_config_entry_first_refresh()
 
