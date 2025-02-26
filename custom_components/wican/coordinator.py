@@ -1,20 +1,38 @@
-import logging
-from datetime import timedelta
-from homeassistant.const import CONF_SCAN_INTERVAL
-from homeassistant.helpers.update_coordinator import (
-    DataUpdateCoordinator,
-)
-from homeassistant.exceptions import ConfigEntryNotReady
+"""Coordinator for WiCan Integration.
 
-from .const import DOMAIN, CONF_DEFAULT_SCAN_INTERVAL
+Purpose: Coordinate data update for WiCAN devices.
+"""
+
+from datetime import timedelta
+import logging
+
+from homeassistant.const import CONF_SCAN_INTERVAL
+from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import ConfigEntryNotReady
+from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
+
+from .const import CONF_DEFAULT_SCAN_INTERVAL, DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 
 
 class WiCanCoordinator(DataUpdateCoordinator):
+    """WiCAN Coordinator class based on HomeAssistant DataUpdateCoordinator.
+
+    Attributes
+    ----------
+    api: Any
+        WiCan device api to be used.
+    data: dict
+        Inherited from DataUpdateCoordinator.
+        dict is created and filled from WiCan API with first call of method "_async_update_data".
+
+    """
+
     ecu_online = False
 
-    def __init__(self, hass, config_entry, api):
+    def __init__(self, hass: HomeAssistant, config_entry, api) -> None:
+        """Initialize a WiCanCoordinator and set the WiCan device API."""
         SCAN_INTERVAL = timedelta(
             seconds=config_entry.options.get(
                 CONF_SCAN_INTERVAL,
@@ -30,6 +48,15 @@ class WiCanCoordinator(DataUpdateCoordinator):
         return await self.get_data()
 
     async def get_data(self):
+        """Check, if WiCan API is available and return data dictionary containing car configuration and data (PIDs) using the WiCan API.
+
+        Returns
+        -------
+        data: dict
+            Dictionary containing WiCan device status, car configuration and data (PIDs).
+            If device API is not reachable, return an empty dict.
+
+        """
         data = {}
         data["status"] = await self.api.check_status()
         if not data["status"]:
@@ -52,6 +79,14 @@ class WiCanCoordinator(DataUpdateCoordinator):
         return data
 
     def device_info(self):
+        """Return basic device information shown in HomeAssistant "Device Info" section of the WiCan device.
+
+        Returns
+        -------
+        dict
+            Dictionary containing details about the device (e.g. Device URL, Software Version).
+
+        """
         return {
             "identifiers": {(DOMAIN, self.data["status"]["device_id"])},
             "name": "WiCAN",
@@ -63,15 +98,51 @@ class WiCanCoordinator(DataUpdateCoordinator):
         }
 
     def available(self) -> bool:
+        """Check, if WiCan device is available, based on the data received from earlier API calls.
+
+        Returns
+        -------
+        bool
+            Device availability.
+
+        """
         return self.data["status"] != False
 
     def get_status(self, key) -> str | bool:
+        """Check, if device status is available from previous API call and get status-value for a given key.
+
+        Parameters
+        ----------
+        key: Any
+            Status key to be checked (e.g. "fw_version").
+
+        Returns
+        -------
+        str | bool:
+            str containing status-value, if device status is available.
+            False, if no device status available.
+
+        """
         if not self.data["status"]:
             return False
 
         return self.data["status"][key]
 
     def get_pid_value(self, key) -> str | bool:
+        """Check, if device status is available from previous API call and get value for a given PID-key.
+
+        Parameters
+        ----------
+        key: Any
+            PID-key (e.g. "SOC_BMS") to be checked for available data.
+
+        Returns
+        -------
+        str | bool
+            False, if no device status available.
+            str containing value of PID, if device status is available.
+
+        """
         if not self.data["status"]:
             return False
 

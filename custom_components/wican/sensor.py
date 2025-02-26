@@ -1,27 +1,60 @@
-import logging
-from homeassistant.components.number import NumberEntity, NumberDeviceClass
+"""Sensor processing for WiCAN Integration.
 
-from homeassistant.const import (
-    EntityCategory,
-)
-from homeassistant.helpers.entity import EntityCategory
+Purpose: provide sensor data for available WiCAN sensors.
+"""
+
+import logging
+
+from homeassistant.components.number import NumberDeviceClass
+from homeassistant.const import EntityCategory
+from homeassistant.core import HomeAssistant
 
 from .const import DOMAIN
-from .entity import WiCanStatusEntity, WiCanPidEntity
+from .entity import WiCanPidEntity, WiCanStatusEntity
 
 _LOGGER = logging.getLogger(__name__)
 
 
 def process_status_voltage(i):
+    """Convert status voltage to type float.
+
+    Parameters
+    ----------
+    i : Any
+        Voltage value.
+
+    Returns
+    -------
+    float:
+        Voltage value converted to type float.
+
+    """
     return float(i[:-1])
 
 
-async def async_setup_entry(hass, entry, async_add_entities):
+async def async_setup_entry(hass: HomeAssistant, entry, async_add_entities):
+    """Create and provide list of sensors containing WiCanStatusEntities and WiCanPidEntities.
+
+    Parameters
+    ----------
+    hass : HomeAssistant
+        HomeAssistant object for coordinator.
+    entry: Any
+        WiCan entry in HomeAssistant data for coordinator.
+    async_add_entities: Any
+        Object to be called with list of WiCanEntities.
+
+    Returns
+    -------
+    async_add_entities: method:
+        Calls function async_add_entities containing newly created list of WiCanEntities.
+
+    """
     coordinator = hass.data[DOMAIN][entry.entry_id]
 
     entities = []
-    if coordinator.data["status"] == False:
-        return
+    if not coordinator.data["status"]:
+        return None
 
     entities.append(
         WiCanStatusEntity(
