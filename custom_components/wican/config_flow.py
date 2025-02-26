@@ -37,17 +37,13 @@ class WiCanConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     )
                     return self.async_create_entry(title="WiCAN", data=user_input)
                 else:
-                    errors[CONF_IP_ADDRESS] = (
-                        "Failed validation, double check the IP, as well as check if you have protocol set to auto_pid"
-                    )
+                    errors["base"] = "invalid_config"
             except ConnectionError:
                 _LOGGER.exception("Connection Error")
-                errors[CONF_IP_ADDRESS] = (
-                    "WiCAN Connection error, are you sure the IP is correct?"
-                )
+                errors["base"] = "cannot_connect"
             except Exception:
                 _LOGGER.exception("Unexpected exception")
-                errors[CONF_IP_ADDRESS] = "WiCAN not validated, unknown error"
+                errors["base"] = "unknown"
 
         return self.async_show_form(
             step_id="user", data_schema=DATA_SCHEMA, errors=errors
@@ -76,3 +72,4 @@ class WiCanOptionsFlowHandler(config_entries.OptionsFlow):
                 OPTIONS_SCHEMA, self.config_entry.options
             ),
         )
+
