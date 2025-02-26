@@ -142,7 +142,7 @@ class WiCanCoordinator(DataUpdateCoordinator):
         if not self.data["status"]:
             return False
 
-        if self.data["pid"].get("key") is None:
+        if self.data["pid"].get(key) is None:
             return False
 
         return self.data["pid"][key]["value"]
