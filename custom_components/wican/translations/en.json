@@ -31,11 +31,19 @@
             "batt_alert": {"name": "Battery Alert"},
             "ble_status": {"name": "Bluetooth Status"},
             "ecu_status": {"name": "ECU Status"},
-            "mqtt_en": {"name": "MQTT Status"},
+            "mqtt_en": {
+                "name": "MQTT Status",
+                "state_attributes": {
+                    "url": {
+                        "name": "MQTT Url"
+                    }
+                }
+            },
             "sleep_status": {"name": "Sleep Status"}
         },
         "sensor": {
             "batt_voltage": {"name": "Battery Voltage"},
+            "batt_alert": {"name": "Battery Alert"},
             "protocol": {"name": "Mode"},
             "sta_ip": {"name": "IP Address"}
         }

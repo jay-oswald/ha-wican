@@ -61,7 +61,6 @@ async def async_setup_entry(hass: HomeAssistant, entry, async_add_entities):
             coordinator,
             {
                 "key": "batt_voltage",
-                "name": "Battery Voltage",
                 "class": NumberDeviceClass.VOLTAGE,
                 "unit": "V",
                 "category": EntityCategory.DIAGNOSTIC,
@@ -75,7 +74,6 @@ async def async_setup_entry(hass: HomeAssistant, entry, async_add_entities):
             coordinator,
             {
                 "key": "sta_ip",
-                "name": "IP Address",
                 "category": EntityCategory.DIAGNOSTIC,
                 "icon": "mdi:ip-network",
             },
@@ -86,7 +84,6 @@ async def async_setup_entry(hass: HomeAssistant, entry, async_add_entities):
             coordinator,
             {
                 "key": "protocol",
-                "name": "Mode",
                 "category": EntityCategory.DIAGNOSTIC,
                 "icon": "mdi:protocol",
             },

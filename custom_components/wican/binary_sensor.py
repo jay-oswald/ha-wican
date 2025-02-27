@@ -57,7 +57,6 @@ async def async_setup_entry(hass: HomeAssistant, entry, async_add_entities):
             coordinator,
             {
                 "key": "ble_status",
-                "name": "Bluetooth Status",
                 "category": EntityCategory.DIAGNOSTIC,
                 "icon": "mdi:bluetooth",
             },
@@ -69,7 +68,6 @@ async def async_setup_entry(hass: HomeAssistant, entry, async_add_entities):
             coordinator,
             {
                 "key": "sleep_status",
-                "name": "Sleep Status",
                 "category": EntityCategory.DIAGNOSTIC,
                 "icon": "mdi:power-sleep",
                 "attributes": {"voltage": "sleep_volt"},
@@ -82,7 +80,6 @@ async def async_setup_entry(hass: HomeAssistant, entry, async_add_entities):
             coordinator,
             {
                 "key": "batt_alert",
-                "name": "Battery Alert",
                 "category": EntityCategory.DIAGNOSTIC,
                 "icon": "mdi:battery-alert",
                 "attributes": {
@@ -101,7 +98,6 @@ async def async_setup_entry(hass: HomeAssistant, entry, async_add_entities):
             coordinator,
             {
                 "key": "mqtt_en",
-                "name": "MQTT Status",
                 "category": EntityCategory.DIAGNOSTIC,
                 "icon": "mdi:broadcast",
                 "attributes": {
@@ -118,7 +114,6 @@ async def async_setup_entry(hass: HomeAssistant, entry, async_add_entities):
             coordinator,
             {
                 "key": "ecu_status",
-                "name": "ECU Status",
                 "category": EntityCategory.DIAGNOSTIC,
                 "icon": "mdi:chip",
                 "target_state": "online",
