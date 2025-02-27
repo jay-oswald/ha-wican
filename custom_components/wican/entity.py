@@ -40,6 +40,12 @@ class WiCanEntityBase(CoordinatorEntity):
         self._attr_unique_id = "wican_" + device_id + "_" + key
         self.id = "wican_" + device_id[-3:] + "_" + key
         self._attr_name = self.get_data("name")
+        if data.get("icon") is not None:
+            self._attr_icon = data["icon"]
+        if data.get("translation_key") is not None:
+            self._attr_translation_key = data["translation_key"]
+        else:
+            self._attr_translation_key = data["key"]
         self.set_state()
 
     def get_data(self, key):

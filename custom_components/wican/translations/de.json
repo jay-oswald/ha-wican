@@ -26,6 +26,20 @@
             }
         }
     },
+    "entity": {
+        "binary_sensor": {
+            "batt_alert": {"name": "Batterie-Warnung"},
+            "ble_status": {"name": "Bluetooth-Status"},
+            "ecu_status": {"name": "Status Steuergerät"},
+            "mqtt_en": {"name": "MQTT-Status"},
+            "sleep_status": {"name": "Sleep-Modus"}
+        },
+        "sensor": {
+            "batt_voltage": {"name": "Batteriespannung"},
+            "protocol": {"name": "CAN-Protokoll"},
+            "sta_ip": {"name": "IP-Adresse"}
+        }
+    },
     "exceptions": {
         "cannot_connect": {
             "message": "WiCAN Gerät aktuell nicht erreichbar. IP-Adresse: {ip_address}"

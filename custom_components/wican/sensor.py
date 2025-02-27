@@ -65,6 +65,7 @@ async def async_setup_entry(hass: HomeAssistant, entry, async_add_entities):
                 "class": NumberDeviceClass.VOLTAGE,
                 "unit": "V",
                 "category": EntityCategory.DIAGNOSTIC,
+                "icon": "mdi:battery-charging",
             },
             process_status_voltage,
         )
@@ -76,13 +77,19 @@ async def async_setup_entry(hass: HomeAssistant, entry, async_add_entities):
                 "key": "sta_ip",
                 "name": "IP Address",
                 "category": EntityCategory.DIAGNOSTIC,
+                "icon": "mdi:ip-network",
             },
         )
     )
     entities.append(
         WiCanStatusEntity(
             coordinator,
-            {"key": "protocol", "name": "Mode", "category": EntityCategory.DIAGNOSTIC},
+            {
+                "key": "protocol",
+                "name": "Mode",
+                "category": EntityCategory.DIAGNOSTIC,
+                "icon": "mdi:protocol",
+            },
         )
     )
 
