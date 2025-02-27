@@ -52,8 +52,8 @@
             "ecu_status": {
                 "name": "ECU Status",
                 "state": {
-                    "on": "Active",
-                    "off": "Inactive"
+                    "on": "Online",
+                    "off": "Offline"
                 }
             },
             "mqtt_en": {

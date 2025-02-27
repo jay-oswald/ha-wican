@@ -52,8 +52,8 @@
             "ecu_status": {
                 "name": "Status Steuergerät",
                 "state": {
-                    "on": "Aktiv",
-                    "off": "Inaktiv"
+                    "on": "Online",
+                    "off": "Offline"
                 }
             },
             "mqtt_en": {
