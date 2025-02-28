@@ -25,7 +25,6 @@ class WiCanEntityBase(CoordinatorEntity):
     _state = False
     process_state = None
     _attr_has_entity_name = True
-    _attr_name = None
 
     def __init__(self, coordinator, data, process_state=None) -> None:
         """Initialize a WiCanEntity with data, coordinator, process_state and identifiers for HomeAssistant."""
@@ -39,7 +38,12 @@ class WiCanEntityBase(CoordinatorEntity):
         key = self.get_data("key")
         self._attr_unique_id = "wican_" + device_id + "_" + key
         self.id = "wican_" + device_id[-3:] + "_" + key
-        self._attr_name = self.get_data("name")
+        if data.get("icon") is not None:
+            self._attr_icon = data["icon"]
+        if data.get("translation_key") is not None:
+            self._attr_translation_key = data["translation_key"]
+        else:
+            self._attr_translation_key = data["key"]
         self.set_state()
 
     def get_data(self, key):
@@ -171,6 +175,7 @@ class WiCanPidEntity(WiCanEntityBase):
     def __init__(self, coordinator, data, process_state=None) -> None:
         """Initialize the data entity same as WiCanEntityBase."""
         super().__init__(coordinator, data, process_state)
+        self._attr_name = self.get_data("name")
 
     def get_new_state(self):
         """Provide entity value from coordindator based on key of this entity (e.g. "SOC_BMS")."""

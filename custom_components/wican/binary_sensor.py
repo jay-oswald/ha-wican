@@ -57,8 +57,8 @@ async def async_setup_entry(hass: HomeAssistant, entry, async_add_entities):
             coordinator,
             {
                 "key": "ble_status",
-                "name": "Bluetooth Status",
                 "category": EntityCategory.DIAGNOSTIC,
+                "icon": "mdi:bluetooth",
             },
             binary_state("enable"),
         )
@@ -68,8 +68,8 @@ async def async_setup_entry(hass: HomeAssistant, entry, async_add_entities):
             coordinator,
             {
                 "key": "sleep_status",
-                "name": "Sleep Status",
                 "category": EntityCategory.DIAGNOSTIC,
+                "icon": "mdi:power-sleep",
                 "attributes": {"voltage": "sleep_volt"},
             },
             binary_state("enable"),
@@ -79,9 +79,27 @@ async def async_setup_entry(hass: HomeAssistant, entry, async_add_entities):
         WiCanStatusEntity(
             coordinator,
             {
-                "key": "mqtt_en",
-                "name": "MQTT Status",
+                "key": "batt_alert",
                 "category": EntityCategory.DIAGNOSTIC,
+                "icon": "mdi:battery-alert",
+                "attributes": {
+                    "wifi": "batt_alert_ssid",
+                    "voltage": "batt_alert_volt",
+                    "url": "batt_alert_url",
+                    "port": "batt_alert_port",
+                    "user": "batt_mqtt_user",
+                },
+            },
+            binary_state("enable"),
+        )
+    )
+    entities.append(
+        WiCanStatusEntity(
+            coordinator,
+            {
+                "key": "mqtt_en",
+                "category": EntityCategory.DIAGNOSTIC,
+                "icon": "mdi:broadcast",
                 "attributes": {
                     "url": "mqtt_url",
                     "port": "mqtt_port",
@@ -96,8 +114,8 @@ async def async_setup_entry(hass: HomeAssistant, entry, async_add_entities):
             coordinator,
             {
                 "key": "ecu_status",
-                "name": "ECU Status",
                 "category": EntityCategory.DIAGNOSTIC,
+                "icon": "mdi:chip",
                 "target_state": "online",
             },
             binary_state("online"),

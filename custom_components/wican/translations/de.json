@@ -26,6 +26,74 @@
             }
         }
     },
+    "entity": {
+        "binary_sensor": {
+            "batt_alert": {
+                "name": "Batterie-Warnung",
+                "state": {
+                    "on": "Aktiviert",
+                    "off": "Deaktiviert"
+                },
+                "state_attributes": {
+                    "port": {"name": "MQTT-Broker Port"},
+                    "url": {"name": "MQTT-Broker URL"},
+                    "user": {"name": "MQTT Benutzer"},
+                    "voltage": {"name": "Spannung für Warnung"},
+                    "wifi": {"name": "WLAN SSID"}
+                }
+            },
+            "ble_status": {
+                "name": "Bluetooth-Status",
+                "state": {
+                    "on": "Aktiviert",
+                    "off": "Deaktiviert"
+                }
+            },
+            "ecu_status": {
+                "name": "Status Steuergerät",
+                "state": {
+                    "on": "Online",
+                    "off": "Offline"
+                }
+            },
+            "mqtt_en": {
+                "name": "MQTT-Status",
+                "state": {
+                    "on": "Aktiviert",
+                    "off": "Deaktiviert"
+                },
+                "state_attributes": {
+                    "port": {"name": "MQTT-Broker Port"},
+                    "url": {"name": "MQTT-Broker URL"},
+                    "user": {"name": "MQTT Benutzer"}
+                }
+            },
+            "sleep_status": {
+                "name": "Sleep-Modus",
+                "state": {
+                    "on": "Aktiviert",
+                    "off": "Deaktiviert"
+                },
+                "state_attributes": {
+                    "voltage": {"name": "Spannung für Sleep-Modus"}
+                }
+            }
+        },
+        "sensor": {
+            "batt_voltage": {"name": "Batteriespannung"},
+            "protocol": {
+                "name": "CAN-Protokoll",
+                "state": {
+                    "auto_pid": "AutoPID",
+                    "elm327": "ELM327",
+                    "realdash66": "realdash 66",
+                    "savvycan": "SavvyCAN",
+                    "slcan": "CAN over Serial / SLCAN"
+                }
+            },
+            "sta_ip": {"name": "IP-Adresse"}
+        }
+    },
     "exceptions": {
         "cannot_connect": {
             "message": "WiCAN Gerät aktuell nicht erreichbar. IP-Adresse: {ip_address}"

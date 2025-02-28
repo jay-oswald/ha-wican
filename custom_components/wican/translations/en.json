@@ -26,6 +26,74 @@
             }
         }
     },
+    "entity": {
+        "binary_sensor": {
+            "batt_alert": {
+                "name": "Battery Alert",
+                "state": {
+                    "on": "Disabled",
+                    "off": "Enabled"
+                },
+                "state_attributes": {
+                    "wifi": {"name": "Wifi SSID"},
+                    "voltage": {"name": "Voltage for Warnung"},
+                    "url": {"name": "MQTT Broker URL"},
+                    "port": {"name": "MQTT Broker Port"},
+                    "user": {"name": "MQTT User"}
+                }
+            },
+            "ble_status": {
+                "name": "Bluetooth Status",
+                "state": {
+                    "on": "Disabled",
+                    "off": "Enabled"
+                }
+            },
+            "ecu_status": {
+                "name": "ECU Status",
+                "state": {
+                    "on": "Online",
+                    "off": "Offline"
+                }
+            },
+            "mqtt_en": {
+                "name": "MQTT Status",
+                "state": {
+                    "on": "Disabled",
+                    "off": "Enabled"
+                },
+                "state_attributes": {
+                    "url": {"name": "MQTT Broker URL"},
+                    "port": {"name": "MQTT Broker Port"},
+                    "user": {"name": "MQTT User"}
+                }
+            },
+            "sleep_status": {
+                "name": "Sleep Status",
+                "state": {
+                    "on": "Disabled",
+                    "off": "Enabled"
+                },
+                "state_attributes": {
+                    "voltage": {"name": "Sleep Voltage"}
+                }
+            }
+        },
+        "sensor": {
+            "batt_voltage": {"name": "Battery Voltage"},
+            "protocol": {
+                "name": "Mode",
+                "state": {
+                    "auto_pid": "AutoPID",
+                    "elm327": "ELM327",
+                    "realdash66": "realdash 66",
+                    "savvycan": "SavvyCAN",
+                    "slcan": "CAN over Serial / SLCAN"
+                }
+            },
+            "sta_ip": {"name": "IP Address"}
+        }
+    },
     "exceptions": {
         "cannot_connect": {
             "message": "WiCAN device not available. IP-Address: {ip_address}"
