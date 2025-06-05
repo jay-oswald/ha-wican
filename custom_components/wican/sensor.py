@@ -5,31 +5,18 @@ Purpose: provide sensor data for available WiCAN sensors.
 
 import logging
 
-from homeassistant.components.number import NumberDeviceClass
-from homeassistant.const import EntityCategory
+from homeassistant.components.sensor import SensorStateClass
 from homeassistant.core import HomeAssistant
 
-from .const import DOMAIN
+from .const import (
+    DEVICE_CLASSES_SENSORS,
+    DOMAIN,
+    STATUS_SENSORS,
+    WiCanSensorEntityDescription,
+)
 from .entity import WiCanPidEntity, WiCanStatusEntity
 
 _LOGGER = logging.getLogger(__name__)
-
-
-def process_status_voltage(i):
-    """Convert status voltage to type float.
-
-    Parameters
-    ----------
-    i : Any
-        Voltage value.
-
-    Returns
-    -------
-    float:
-        Voltage value converted to type float.
-
-    """
-    return float(i[:-1])
 
 
 async def async_setup_entry(hass: HomeAssistant, entry, async_add_entities):
@@ -56,38 +43,8 @@ async def async_setup_entry(hass: HomeAssistant, entry, async_add_entities):
     if not coordinator.data["status"]:
         return None
 
-    entities.append(
-        WiCanStatusEntity(
-            coordinator,
-            {
-                "key": "batt_voltage",
-                "class": NumberDeviceClass.VOLTAGE,
-                "unit": "V",
-                "category": EntityCategory.DIAGNOSTIC,
-                "icon": "mdi:battery-charging",
-            },
-            process_status_voltage,
-        )
-    )
-    entities.append(
-        WiCanStatusEntity(
-            coordinator,
-            {
-                "key": "sta_ip",
-                "category": EntityCategory.DIAGNOSTIC,
-                "icon": "mdi:ip-network",
-            },
-        )
-    )
-    entities.append(
-        WiCanStatusEntity(
-            coordinator,
-            {
-                "key": "protocol",
-                "category": EntityCategory.DIAGNOSTIC,
-                "icon": "mdi:protocol",
-            },
-        )
+    entities.extend(
+        WiCanStatusEntity(coordinator, description) for description in STATUS_SENSORS
     )
 
     if not coordinator.ecu_online:
@@ -105,15 +62,19 @@ async def async_setup_entry(hass: HomeAssistant, entry, async_add_entities):
             append = True
 
         if append:
+            translated_device_class = DEVICE_CLASSES_SENSORS.get(
+                coordinator.data["pid"][key]["class"]
+            )
             entities.append(
                 WiCanPidEntity(
                     coordinator,
-                    {
-                        "key": key,
-                        "name": key,
-                        "class": coordinator.data["pid"][key]["class"],
-                        "unit": coordinator.data["pid"][key]["unit"],
-                    },
+                    WiCanSensorEntityDescription(
+                        key=key,
+                        name=key,
+                        device_class=translated_device_class,
+                        unit_of_measurement=coordinator.data["pid"][key]["unit"],
+                        state_class=SensorStateClass.MEASUREMENT,
+                    ),
                 )
             )
 

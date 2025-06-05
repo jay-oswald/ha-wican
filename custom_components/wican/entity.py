@@ -1,9 +1,49 @@
 """Different types of WiCan entities based on DataUpdateCoordinator entities."""
 
+from homeassistant.const import STATE_OFF, STATE_ON
 from homeassistant.core import callback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
+from .const import WiCanEntityDescription
 from .coordinator import WiCanCoordinator
+
+
+def binary_state(state: str, target_state: str):
+    """Check compare binary state against target state to determine if sensor is 'on' or 'off'.
+
+    Parameters
+    ----------
+    state: str
+        binary sensor state
+    target_state : str
+        target state indicating 'on'.
+
+    Returns
+    -------
+    str:
+        returns homeassistant const STATE_ON or STATE_OFF based on provided input.
+
+    """
+    if state == target_state:
+        return STATE_ON
+    return STATE_OFF
+
+
+def str_to_float(state: str):
+    """Convert status voltage to type float.
+
+    Parameters
+    ----------
+    state : str
+        Voltage value.
+
+    Returns
+    -------
+    float:
+        Voltage value converted to type float.
+
+    """
+    return float(state[:-1])
 
 
 class WiCanEntityBase(CoordinatorEntity):
@@ -13,51 +53,30 @@ class WiCanEntityBase(CoordinatorEntity):
     ----------
     coordinator: WiCanCoordinator
         WiCan coordinator handling the device integration via the WiCan API.
-    data : dict
-        Data to be stored in the entity.
-    process_state: Any, optional
-        Method to convert status values (e.g. type conversion to float).
+    entity_description : WiCanEntityDescription
+        Description details for the WiCan entity.
 
     """
 
-    data = {}
+    entity_description: WiCanEntityDescription
     coordinator: WiCanCoordinator
     _state = False
-    process_state = None
     _attr_has_entity_name = True
 
-    def __init__(self, coordinator, data, process_state=None) -> None:
-        """Initialize a WiCanEntity with data, coordinator, process_state and identifiers for HomeAssistant."""
+    def __init__(self, coordinator, entity_description: WiCanEntityDescription) -> None:
+        """Initialize a WiCanEntity with coordinator, entity description and identifiers for HomeAssistant."""
         super().__init__(coordinator)
-        self.data = data
+        self.entity_description = entity_description
         self.coordinator = coordinator
-        self.process_state = process_state
 
         device_id = self.coordinator.data["status"]["device_id"]
 
-        key = self.get_data("key")
+        key = self.entity_description.key
         self._attr_unique_id = "wican_" + device_id + "_" + key
         self.id = "wican_" + device_id[-3:] + "_" + key
-        if data.get("icon") is not None:
-            self._attr_icon = data["icon"]
-        if data.get("translation_key") is not None:
-            self._attr_translation_key = data["translation_key"]
-        else:
-            self._attr_translation_key = data["key"]
+        if self.entity_description.translation_key is None:
+            self._attr_translation_key = self.entity_description.key
         self.set_state()
-
-    def get_data(self, key):
-        """Provide data for a given key.
-
-        Parameters
-        ----------
-        key : Any
-            key to be used to retrieve data from the dictionary.
-
-        """
-        if key in self.data:
-            return self.data[key]
-        return None
 
     def get_new_state(self):
         """Return data from coordinator. Method defined for implementation in child classes of WiCanEntityBase.
@@ -80,9 +99,10 @@ class WiCanEntityBase(CoordinatorEntity):
         new_state = self.get_new_state()
         if new_state is None:
             return
-
-        if self.process_state is not None:
-            new_state = self.process_state(new_state)
+        if self.entity_description.target_state is not None:
+            new_state = binary_state(new_state, self.entity_description.target_state)
+        if self.entity_description.process_status_voltage is True:
+            new_state = str_to_float(new_state)
 
         self._state = new_state
 
@@ -120,7 +140,7 @@ class WiCanEntityBase(CoordinatorEntity):
             Category of the entity (e.g. DIAGNOSTIC for some WiCan entities like "IP-Address").
 
         """
-        return self.get_data("category")
+        return self.entity_description.entity_category
 
     @property
     def state(self):
@@ -130,35 +150,35 @@ class WiCanEntityBase(CoordinatorEntity):
     @property
     def unit_of_measurement(self):
         """Return the unit of measurement of this WiCanEntity, if any."""
-        if self.get_data("unit") == "none":
+        if self.entity_description.unit_of_measurement == "none":
             return None
-        else:
-            return self.get_data("unit")
+        return self.entity_description.unit_of_measurement
 
     @property
     def device_class(self):
         """Return the class of this device, from component DEVICE_CLASSES."""
-        if self.get_data("class") == "none":
+        if self.entity_description.device_class == "none":
             return None
-        else:
-            return self.get_data("class")
+        return self.entity_description.device_class
 
 
 class WiCanStatusEntity(WiCanEntityBase):
     """WiCan Status Entity based on WiCanEntityBase."""
 
-    def __init__(self, coordinator, data, process_state=None) -> None:
+    def __init__(self, coordinator, entity_description: WiCanEntityDescription) -> None:
         """Initialize the status entity same as WiCanEntityBase."""
-        super().__init__(coordinator, data, process_state)
+        super().__init__(coordinator, entity_description)
 
     def get_new_state(self):
         """Provide entity status from coordindator based on key of this entity (e.g. "fw_version")."""
-        return self.coordinator.get_status(self.get_data("key"))
+        return self.coordinator.get_status(self.entity_description.key)
 
     @property
     def extra_state_attributes(self):
         """Provide state attributes from WiCan device status via coordinator, if defined for entity."""
-        attributes = self.get_data("attributes")
+
+        """TODO: Check if state attributes shall be replaced by additional sensors: see "Tip" under https://developers.home-assistant.io/docs/core/entity/sensor?_highlight=extra_state_attributes#properties"""
+        attributes = self.entity_description.attributes
         if attributes is None:
             return None
 
@@ -172,19 +192,19 @@ class WiCanStatusEntity(WiCanEntityBase):
 class WiCanPidEntity(WiCanEntityBase):
     """WiCan Data Entity based on WiCanEntityBase."""
 
-    def __init__(self, coordinator, data, process_state=None) -> None:
+    def __init__(self, coordinator, entity_description: WiCanEntityDescription) -> None:
         """Initialize the data entity same as WiCanEntityBase."""
-        super().__init__(coordinator, data, process_state)
-        self._attr_name = self.get_data("name")
+        super().__init__(coordinator, entity_description)
+        self._attr_name = self.entity_description.name
 
     def get_new_state(self):
         """Provide entity value from coordindator based on key of this entity (e.g. "SOC_BMS")."""
-        return self.coordinator.get_pid_value(self.get_data("key"))
+        return self.coordinator.get_pid_value(self.entity_description.key)
 
     @property
     def extra_state_attributes(self):
         """Provide state attributes from WiCan device PID via coordinator, if defined for entity."""
-        attributes = self.get_data("attributes")
+        attributes = self.entity_description.attributes
         if attributes is None:
             return None
 
