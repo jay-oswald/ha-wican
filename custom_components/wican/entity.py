@@ -9,19 +9,19 @@ from .coordinator import WiCanCoordinator
 
 
 def binary_state(state: str, target_state: str):
-    """Check compare binary state against target state to determine if sensor is 'on' or 'off'.
+    """Compare binary state against target state to determine if sensor is 'on' or 'off'.
 
     Parameters
     ----------
     state: str
-        binary sensor state
+        Binary sensor state.
     target_state : str
-        target state indicating 'on'.
+        Target state indicating 'on'.
 
     Returns
     -------
     str:
-        returns homeassistant const STATE_ON or STATE_OFF based on provided input.
+        Homeassistant const STATE_ON or STATE_OFF based on result of comparison.
 
     """
     if state == target_state:
