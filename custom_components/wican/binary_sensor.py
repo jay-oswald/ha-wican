@@ -3,29 +3,10 @@
 Purpose: provide binary sensor data for available WiCAN sensors.
 """
 
-from homeassistant.const import STATE_OFF, STATE_ON, EntityCategory
 from homeassistant.core import HomeAssistant
 
-from .const import DOMAIN
+from .const import DOMAIN, STATUS_BINARY_SENSORS, WiCanBinarySensorEntityDescription
 from .entity import WiCanPidEntity, WiCanStatusEntity
-
-
-def binary_state(target_state: str):
-    """Check binary state for provided str.
-
-    Parameters
-    ----------
-    target_state : str
-        state to be checked.
-
-    Returns
-    -------
-    lambda:
-        returns homeassistant const STATE_ON or STATE_OFF based on provided input.
-
-    """
-
-    return lambda state: STATE_ON if state == target_state else STATE_OFF
 
 
 async def async_setup_entry(hass: HomeAssistant, entry, async_add_entities):
@@ -52,74 +33,9 @@ async def async_setup_entry(hass: HomeAssistant, entry, async_add_entities):
     if not coordinator.data["status"]:
         return None
 
-    entities.append(
-        WiCanStatusEntity(
-            coordinator,
-            {
-                "key": "ble_status",
-                "category": EntityCategory.DIAGNOSTIC,
-                "icon": "mdi:bluetooth",
-            },
-            binary_state("enable"),
-        )
-    )
-    entities.append(
-        WiCanStatusEntity(
-            coordinator,
-            {
-                "key": "sleep_status",
-                "category": EntityCategory.DIAGNOSTIC,
-                "icon": "mdi:power-sleep",
-                "attributes": {"voltage": "sleep_volt"},
-            },
-            binary_state("enable"),
-        )
-    )
-    entities.append(
-        WiCanStatusEntity(
-            coordinator,
-            {
-                "key": "batt_alert",
-                "category": EntityCategory.DIAGNOSTIC,
-                "icon": "mdi:battery-alert",
-                "attributes": {
-                    "wifi": "batt_alert_ssid",
-                    "voltage": "batt_alert_volt",
-                    "url": "batt_alert_url",
-                    "port": "batt_alert_port",
-                    "user": "batt_mqtt_user",
-                },
-            },
-            binary_state("enable"),
-        )
-    )
-    entities.append(
-        WiCanStatusEntity(
-            coordinator,
-            {
-                "key": "mqtt_en",
-                "category": EntityCategory.DIAGNOSTIC,
-                "icon": "mdi:broadcast",
-                "attributes": {
-                    "url": "mqtt_url",
-                    "port": "mqtt_port",
-                    "user": "mqtt_user",
-                },
-            },
-            binary_state("enable"),
-        )
-    )
-    entities.append(
-        WiCanStatusEntity(
-            coordinator,
-            {
-                "key": "ecu_status",
-                "category": EntityCategory.DIAGNOSTIC,
-                "icon": "mdi:chip",
-                "target_state": "online",
-            },
-            binary_state("online"),
-        )
+    entities.extend(
+        WiCanStatusEntity(coordinator, description)
+        for description in STATUS_BINARY_SENSORS
     )
 
     if not coordinator.ecu_online:
@@ -134,12 +50,12 @@ async def async_setup_entry(hass: HomeAssistant, entry, async_add_entities):
                 entities.append(
                     WiCanPidEntity(
                         coordinator,
-                        {
-                            "key": key,
-                            "name": key,
-                            "class": coordinator.data["pid"][key]["class"],
-                        },
-                        binary_state("on"),
+                        WiCanBinarySensorEntityDescription(
+                            key=key,
+                            name=key,
+                            device_class=coordinator.data["pid"][key]["class"],
+                            target_state="on",
+                        ),
                     )
                 )
 
