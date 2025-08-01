@@ -5,6 +5,9 @@ This is the official HomeAssistant integration for [WiCAN by meatpi](https://git
 
 This integration is available via HACS, and not part of the default HomeAssistant integrations. 
 
+## What is not part of this repository?
+WiCAN Firmware changes: Car profiles and other feature requests/bugfixes for the WiCAN device itself are handled via the [WiCAN repository](https://github.com/meatpiHQ/wican-fw).
+
 # Documentation
 This repository contains only documentation for the HomeAssistant integration of WiCAN.
 
