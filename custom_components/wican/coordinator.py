@@ -1,19 +1,46 @@
 """Coordinator for WiCan Integration.
 
-Purpose: Coordinate data update for WiCAN devices.
+Purpose: Coordinate data update for WiCAN devices and persist a minimal
+snapshot to support offline startup with cached state.
 """
+
+from __future__ import annotations
 
 from datetime import timedelta
 import logging
+from typing import Any, Optional, TypedDict
 
 from homeassistant.const import CONF_SCAN_INTERVAL
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryNotReady
+from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
+from homeassistant.util import dt as dt_util
 
 from .const import CONF_DEFAULT_SCAN_INTERVAL, DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
+
+
+class Snapshot(TypedDict):
+    """Minimal persisted snapshot schema for offline startup.
+
+    Keys
+    ----
+    device_id: str
+        Device identifier used in entity unique_id.
+    status: dict
+        Last known device status payload from `/check_status`.
+    pid: dict
+        Last known AutoPID data payload (combined metadata + values).
+    timestamp: str
+        UTC ISO8601 timestamp when the snapshot was written.
+    """
+
+    device_id: str
+    status: dict
+    pid: dict
+    timestamp: str
 
 
 class WiCanCoordinator(DataUpdateCoordinator):
@@ -43,6 +70,16 @@ class WiCanCoordinator(DataUpdateCoordinator):
             hass, _LOGGER, name="WiCAN Coordinator", update_interval=SCAN_INTERVAL
         )
         self.api = api
+        # Storage for last-known snapshot
+        self._store: Store = Store(
+            hass, 1, f"{DOMAIN}_{config_entry.entry_id}_snapshot"
+        )
+        self._last_persist_utc: Optional[str] = None
+        # Debounce writes to avoid excessive I/O
+        self._persist_min_interval_sec: int = 30
+        # Offline tolerance tracking
+        self._stale: bool = False
+        self.last_successful_update: Optional[dt_util.datetime] = None
 
     async def _async_update_data(self):
         return await self.get_data()
@@ -57,26 +94,136 @@ class WiCanCoordinator(DataUpdateCoordinator):
             If device API is not reachable, return an empty dict.
 
         """
-        data = {}
-        data["status"] = await self.api.check_status()
-        if not data["status"]:
+        data: dict[str, Any] = {}
+        status = await self.api.check_status()
+
+        if not status:
+            # Device offline/unreachable: prefer in-memory data, then snapshot, else first-run failure
+            if self.data and isinstance(self.data.get("status"), dict):
+                _LOGGER.warning("WiCAN device offline; serving stale in-memory data")
+                self._stale = True
+                return self.data
+
+            snapshot = await self._load_snapshot()
+            if snapshot is not None:
+                _LOGGER.warning("WiCAN device offline; using cached snapshot")
+                self._stale = True
+                data["status"] = snapshot.get("status")
+                data["pid"] = snapshot.get("pid")
+                # Best-effort ECU marker from snapshot
+                self.ecu_online = (
+                    isinstance(data["status"], dict)
+                    and data["status"].get("ecu_status") == "online"
+                )
+                return data
+
+            # First run: no memory, no snapshot
             raise ConfigEntryNotReady(
                 translation_domain=DOMAIN,
                 translation_key="cannot_connect",
                 translation_placeholders={"ip_address": self.api.ip},
             )
 
+        data["status"] = status
         self.ecu_online = True
         # self.ecu_online = data['status']['ecu_status'] == 'online'
 
         if not self.ecu_online:
+            await self._persist_snapshot(
+                {
+                    "device_id": status.get("device_id", "unknown"),
+                    "status": status,
+                    "pid": {},
+                    "timestamp": dt_util.utcnow().isoformat(),
+                }
+            )
             return data
 
-        data["pid"] = await self.api.get_pid()
+        pid = await self.api.get_pid()
+        data["pid"] = pid if pid else {}
 
-        _LOGGER.info(data)
+        # Persist minimal snapshot after a successful poll
+        try:
+            await self._persist_snapshot(
+                {
+                    "device_id": status.get("device_id", "unknown"),
+                    "status": status,
+                    "pid": data["pid"],
+                    "timestamp": dt_util.utcnow().isoformat(),
+                }
+            )
+        except Exception:  # pragma: no cover - avoid breaking updates on storage errors
+            _LOGGER.warning("Failed to persist WiCAN snapshot", exc_info=True)
+
+        # Success path: clear stale flag and record last successful update time
+        self._stale = False
+        self.last_successful_update = dt_util.utcnow()
+
+        _LOGGER.debug("Updated WiCAN data: %s", list(data.keys()))
 
         return data
+
+    async def _load_snapshot(self) -> Optional[Snapshot]:
+        """Load last-known snapshot from Home Assistant storage.
+
+        Returns None if loading fails or the data is invalid.
+        """
+        try:
+            snapshot = await self._store.async_load()
+        except Exception as err:  # file corruption or read error
+            _LOGGER.warning("Failed to load WiCAN snapshot: %s", err)
+            return None
+
+        if not isinstance(snapshot, dict):
+            if snapshot is not None:
+                _LOGGER.warning("Ignoring malformed WiCAN snapshot: not a dict")
+            return None
+
+        # Basic shape validation
+        required = {"device_id", "status", "pid", "timestamp"}
+        if not required.issubset(set(snapshot.keys())):
+            _LOGGER.warning("Ignoring malformed WiCAN snapshot: missing keys")
+            return None
+        return snapshot  # type: ignore[return-value]
+
+    async def _persist_snapshot(self, snapshot: Snapshot) -> None:
+        """Persist snapshot with simple time-based debouncing.
+
+        To prevent excessive disk writes, this method will not write more than
+        once every ``_persist_min_interval_sec`` seconds.
+        """
+        now_iso = dt_util.utcnow().isoformat()
+        if self._last_persist_utc is not None:
+            try:
+                # Compare using parsed datetimes; fall back to write on parse errors
+                last = dt_util.parse_datetime(self._last_persist_utc)
+                now = dt_util.parse_datetime(now_iso)
+                if last and now:
+                    delta = (now - last).total_seconds()
+                    if delta < self._persist_min_interval_sec:
+                        return
+            except Exception:
+                # On parsing failure, continue to save
+                pass
+
+        await self._store.async_save(snapshot)
+        self._last_persist_utc = now_iso
+
+    async def async_preload_snapshot(self) -> bool:
+        """Preload snapshot into coordinator data if available.
+
+        Returns True if a snapshot was loaded, False otherwise.
+        """
+        snapshot = await self._load_snapshot()
+        if not snapshot:
+            return False
+
+        # Do not set stale here; staleness is determined on refresh paths
+        self.data = {
+            "status": snapshot.get("status"),
+            "pid": snapshot.get("pid", {}),
+        }
+        return True
 
     def device_info(self):
         """Return basic device information shown in HomeAssistant "Device Info" section of the WiCan device.
@@ -106,7 +253,11 @@ class WiCanCoordinator(DataUpdateCoordinator):
             Device availability.
 
         """
-        return self.data["status"] != False
+        return bool(self.data and self.data.get("status"))
+
+    def stale(self) -> bool:
+        """Return True if current data is stale (served from cache or memory when offline)."""
+        return self._stale
 
     def get_status(self, key) -> str | bool:
         """Check, if device status is available from previous API call and get status-value for a given key.
