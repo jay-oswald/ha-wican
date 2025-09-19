@@ -17,6 +17,17 @@ There you will also find configuration instructions for the device itself (e.g. 
 # Integration Status
 It is very much in an Alpha stage at the moment, and under constant changes, hoping to get it in a Beta state soon where we could recommend starting to use it.
 
+# Offline, Restore, and Freshness
+- Snapshot caching: The integration stores a minimal snapshot of the last-known data (device status and PIDs). On restart while the device is offline, entities are created from this snapshot so your dashboard does not go empty.
+- Stale indicator: Entities include extra attributes to indicate freshness:
+  - `wican_data_stale`: true when values are coming from cache/memory while the device is offline.
+  - `last_successful_update`: ISO8601 timestamp of the last successful update, or null if none yet.
+- Availability: Entities remain available while stale; use the `wican_data_stale` attribute to drive UI/display.
+- First install while offline: On a brand‑new install with no snapshot yet and the device unreachable, setup defers with a retry (it won’t crash Home Assistant). Once the device is reachable or a snapshot exists, setup proceeds.
+
+# Network Robustness
+- All HTTP calls use bounded timeouts (default ~5s) with robust exception handling. Temporary network errors won’t crash the integration; they trigger the stale/snapshot fallback instead.
+
 # Installation
 
 ## Manual Installation
@@ -40,6 +51,10 @@ It is very much in an Alpha stage at the moment, and under constant changes, hop
 - Enter the mDNS/hostname (wican_xxxxxxxxxxxx.local) or IP-Address of WiCAN device to connect the WiCAN device. If you have multiple WiCAN devices repeat these steps for the other devices.
 
 Result: After completing installation and configuration, WiCAN will be connected to Home Assistant, and you will be able to monitor the available car parameters directly from the Home Assistant interface.
+
+# Development and Tests
+- Quickstart: `python -m venv .venv && source .venv/bin/activate && pip install pytest pytest-asyncio && PYTHONPATH=. pytest -q`
+- A CI workflow runs the test suite on every PR/push as a separate check.
 
 # Troubleshooting
 ### Not possible to add a device via IP-Address or mDNS/hostname
