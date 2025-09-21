@@ -1,12 +1,20 @@
-"""Different types of WiCan entities based on DataUpdateCoordinator entities."""
+"""Different types of WiCan entities based on DataUpdateCoordinator entities.
+
+Adds RestoreEntity to support state restore when device is offline and
+exposes freshness metadata as extra attributes.
+"""
+
+from __future__ import annotations
 
 from homeassistant.core import callback
+from homeassistant.helpers.restore_state import RestoreEntity
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
+from homeassistant.util import dt as dt_util
 
 from .coordinator import WiCanCoordinator
 
 
-class WiCanEntityBase(CoordinatorEntity):
+class WiCanEntityBase(CoordinatorEntity, RestoreEntity):
     """WiCan entity based on DataUpdateCoordinator entity.
 
     Attributes
@@ -45,6 +53,15 @@ class WiCanEntityBase(CoordinatorEntity):
         else:
             self._attr_translation_key = data["key"]
         self.set_state()
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        # If we're starting with stale/no live data, restore last HA state
+        if self.coordinator.stale() and (self._state is False or self._state is None):
+            last_state = await self.async_get_last_state()
+            if last_state and last_state.state not in (None, "unknown", "unavailable"):
+                self._state = last_state.state
+                self.async_write_ha_state()
 
     def get_data(self, key):
         """Provide data for a given key.
@@ -108,6 +125,9 @@ class WiCanEntityBase(CoordinatorEntity):
             Device availability provided by WiCanCoordinator availability() method.
 
         """
+        # Keep entities visible when serving stale data
+        if self.coordinator.stale():
+            return True
         return self.coordinator.available()
 
     @property
@@ -143,6 +163,13 @@ class WiCanEntityBase(CoordinatorEntity):
         else:
             return self.get_data("class")
 
+    def _freshness_attributes(self) -> dict:
+        last = self.coordinator.last_successful_update
+        return {
+            "wican_data_stale": self.coordinator.stale(),
+            "last_successful_update": last.isoformat() if last else None,
+        }
+
 
 class WiCanStatusEntity(WiCanEntityBase):
     """WiCan Status Entity based on WiCanEntityBase."""
@@ -157,16 +184,17 @@ class WiCanStatusEntity(WiCanEntityBase):
 
     @property
     def extra_state_attributes(self):
-        """Provide state attributes from WiCan device status via coordinator, if defined for entity."""
+        """Provide state attributes from WiCan device status via coordinator, if defined for entity, plus freshness metadata."""
         attributes = self.get_data("attributes")
+        base = self._freshness_attributes()
         if attributes is None:
-            return None
+            return base
 
         return_attrs = {}
         for key in attributes:
             return_attrs[key] = self.coordinator.get_status(attributes[key])
 
-        return return_attrs
+        return {**base, **return_attrs}
 
 
 class WiCanPidEntity(WiCanEntityBase):
@@ -183,21 +211,22 @@ class WiCanPidEntity(WiCanEntityBase):
 
     @property
     def extra_state_attributes(self):
-        """Provide state attributes from WiCan device PID via coordinator, if defined for entity."""
+        """Provide state attributes from WiCan device PID via coordinator, if defined for entity, plus freshness metadata."""
         attributes = self.get_data("attributes")
+        base = self._freshness_attributes()
         if attributes is None:
-            return None
+            return base
 
         return_attrs = {}
         for key in attributes:
             return_attrs[key] = self.coordinator.get_pid_value(attributes[key])
 
-        return return_attrs
+        return {**base, **return_attrs}
 
     @property
     def available(self) -> bool:
         """Provide availability of the entity."""
-        if self._state is False:
-            return False
-
-        return True
+        # Keep entities visible when serving stale data, otherwise reflect state
+        if self.coordinator.stale():
+            return True
+        return self._state is not False

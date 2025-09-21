@@ -1,8 +1,13 @@
-"""Communicate with WiCAN device HTTP-API via available endpoints."""
+"""Communicate with WiCAN device HTTP-API via available endpoints.
+
+Adds bounded timeouts and robust exception handling so callers can
+reliably detect unreachable devices and trigger stale/snapshot fallback.
+"""
 
 import logging
 
 import aiohttp
+import asyncio
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -23,7 +28,7 @@ class WiCan:
         """Initialize the WiCan API integration with the device IP / name."""
         self.ip = ip
 
-    async def call(self, endpoint, params=None, method="get"):
+    async def call(self, endpoint, params=None, method="get", timeout_total: float = 5.0):
         """Call WiCan device HTTP-API endpoint and provide response.
 
         Parameters
@@ -43,14 +48,22 @@ class WiCan:
         """
         if params is None:
             params = {}
-        match method:
-            case "get":
-                async with aiohttp.ClientSession() as session:
-                    async with session.get(
-                        "http://" + self.ip + endpoint, params=params
-                    ) as resp:
+        url = "http://" + self.ip + endpoint
+        try:
+            timeout = aiohttp.ClientTimeout(total=timeout_total)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                if method.lower() == "get":
+                    async with session.get(url, params=params) as resp:
                         resp.data = await resp.json(content_type=None)
                         return resp
+                else:
+                    # Fallback to GET for unsupported methods in this client
+                    async with session.get(url, params=params) as resp:
+                        resp.data = await resp.json(content_type=None)
+                        return resp
+        except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as err:
+            _LOGGER.debug("WiCAN API call failed for %s: %s", url, err)
+            raise
 
     async def test(self) -> bool:
         """Test, if the WiCan device API is reachable and the protocal is set to "auto_pid".
@@ -61,9 +74,13 @@ class WiCan:
             Returns True, if the API is reachable and the WiCan protocol is set to "auto_pid". Otherwise returns False.
 
         """
-        result = await self.call("/check_status")
+        try:
+            result = await self.call("/check_status")
+        except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as err:
+            _LOGGER.debug("WiCAN test failed: %s", err)
+            return False
 
-        return result.status == 200 and result.data["protocol"] == "auto_pid"
+        return result.status == 200 and result.data.get("protocol") == "auto_pid"
 
     async def check_status(self):
         """Check, if the WiCan device API is reachable.
@@ -76,7 +93,8 @@ class WiCan:
         """
         try:
             result = await self.call("/check_status")
-        except:
+        except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as err:
+            _LOGGER.debug("WiCAN check_status failed: %s", err)
             return False
 
         if result.status != 200:
@@ -96,7 +114,8 @@ class WiCan:
         try:
             pid_data = await self.call("/autopid_data")
             pid_meta = await self.call("/load_car_config")
-        except:
+        except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as err:
+            _LOGGER.debug("WiCAN get_pid failed: %s", err)
             return False
 
         if not isinstance(pid_meta.data, dict):
@@ -105,7 +124,10 @@ class WiCan:
         result = {}
         for key in pid_meta.data:
             result[key] = pid_meta.data[key]
-            value = pid_data.data[key] if key in pid_data.data else False
+            # Treat missing or falsey readings as None so HA renders "unknown"
+            value = pid_data.data[key] if key in pid_data.data else None
+            if value is False:
+                value = None
             result[key]["value"] = value
 
         return result

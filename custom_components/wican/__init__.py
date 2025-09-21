@@ -35,6 +35,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     coordinator = WiCanCoordinator(hass, entry, wican)
 
+    # Preload snapshot if available so entities can be created in offline restarts
+    try:
+        await coordinator.async_preload_snapshot()
+    except Exception:
+        # Snapshot preload failures should not block setup; coordinator handles fallback
+        _LOGGER.debug("Snapshot preload skipped due to error", exc_info=True)
+
+    # First refresh may use live data or the preloaded snapshot; if neither
+    # is available, the coordinator raises ConfigEntryNotReady to trigger retry
     await coordinator.async_config_entry_first_refresh()
 
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
