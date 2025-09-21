@@ -206,6 +206,24 @@ class WiCanCoordinator(DataUpdateCoordinator):
                 # On parsing failure, continue to save
                 pass
 
+        # Merge with previous snapshot to preserve last good PID values when new values are missing
+        try:
+            existing = await self._store.async_load()
+        except Exception:
+            existing = None
+
+        if isinstance(snapshot.get("pid"), dict) and isinstance(existing, dict):
+            prev_pid = existing.get("pid", {}) if isinstance(existing.get("pid"), dict) else {}
+            for key, pid_entry in snapshot["pid"].items():
+                if not isinstance(pid_entry, dict):
+                    continue
+                # If new value is None/False, keep previous good value if present
+                new_val = pid_entry.get("value") if "value" in pid_entry else None
+                prev_entry = prev_pid.get(key, {}) if isinstance(prev_pid, dict) else {}
+                prev_val = prev_entry.get("value") if isinstance(prev_entry, dict) else None
+                if (new_val is None or new_val is False) and (prev_val is not None and prev_val is not False):
+                    pid_entry["value"] = prev_val
+
         await self._store.async_save(snapshot)
         self._last_persist_utc = now_iso
 
@@ -279,7 +297,7 @@ class WiCanCoordinator(DataUpdateCoordinator):
 
         return self.data["status"][key]
 
-    def get_pid_value(self, key) -> str | bool:
+    def get_pid_value(self, key) -> str | bool | None:
         """Check, if device status is available from previous API call and get value for a given PID-key.
 
         Parameters
@@ -298,6 +316,9 @@ class WiCanCoordinator(DataUpdateCoordinator):
             return False
 
         if self.data["pid"].get(key) is None:
-            return False
+            return None
 
-        return self.data["pid"][key]["value"]
+        value = self.data["pid"][key].get("value")
+        if value is False:
+            return None
+        return value

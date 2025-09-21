@@ -124,7 +124,10 @@ class WiCan:
         result = {}
         for key in pid_meta.data:
             result[key] = pid_meta.data[key]
-            value = pid_data.data[key] if key in pid_data.data else False
+            # Treat missing or falsey readings as None so HA renders "unknown"
+            value = pid_data.data[key] if key in pid_data.data else None
+            if value is False:
+                value = None
             result[key]["value"] = value
 
         return result
