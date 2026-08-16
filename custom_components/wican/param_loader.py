@@ -682,6 +682,45 @@ def get_param_unit(param_name: str) -> str | None:
     return None
 
 
+# params.json uses "battery" loosely, to mean "something about the battery",
+# and pairs it with whatever unit the value actually has. Home Assistant's
+# battery device class accepts only "%", so every one of those parameters -
+# 198 of them, including every HV_C_V_nnn cell voltage, LV_V, AC_C_V and
+# CAPACITOR - lost its device class, its unit conversion and its icon.
+#
+# The unit says what the value really is, so use it. Upstream has already
+# corrected a few entries this way (AC_C_C -> current, HV_AV -> power,
+# KWH_CHARGED -> energy); this applies the same reading to the rest.
+_UNIT_TO_DEVICE_CLASS: Final[dict[str, str]] = {
+    "v": "voltage",
+    "mv": "voltage",
+    "kv": "voltage",
+    "a": "current",
+    "ma": "current",
+    "w": "power",
+    "kw": "power",
+    "mw": "power",
+    "wh": "energy_storage",
+    "kwh": "energy_storage",
+    "mwh": "energy_storage",
+}
+
+
+def _infer_device_class_from_unit(unit: str | None) -> str | None:
+    """Infer a device class from a unit, for params.json's overloaded "battery".
+
+    Args:
+        unit: The parameter's unit of measurement.
+
+    Returns:
+        A device class string, or None when the unit does not imply one
+        (e.g. "Ah" - Home Assistant has no electric-charge device class).
+    """
+    if not unit:
+        return None
+    return _UNIT_TO_DEVICE_CLASS.get(unit.strip().lower())
+
+
 def get_param_device_class(param_name: str) -> str | None:
     """Get the device class for a parameter name.
 
@@ -694,9 +733,16 @@ def get_param_device_class(param_name: str) -> str | None:
     param = _lookup_param(param_name)
 
     if param is not None:
-        device_class = param.get("settings", {}).get("class", "")
+        settings = param.get("settings", {})
+        device_class = settings.get("class", "")
         # Return None for empty/none classes
         if device_class and device_class.lower() not in ("", "none"):
+            if device_class.lower() == "battery":
+                unit = settings.get("unit", "")
+                # "%" is the only unit HA accepts for the battery class, so
+                # anything else means params.json meant "battery-related".
+                if unit and unit.strip() != "%":
+                    return _infer_device_class_from_unit(unit)
             return device_class
 
     return None

@@ -8,6 +8,7 @@ from custom_components.wican.param_loader import (
     get_param_unit,
     get_param_device_class,
     get_param_icon,
+    _infer_device_class_from_unit,
     get_param_description,
     is_binary_sensor,
     get_all_params,
@@ -527,3 +528,53 @@ class TestStandardPidFallbacks:
         assert get_param_unit("totally_unknown") is None
         assert get_param_device_class("totally_unknown") is None
         assert get_param_description("totally_unknown") is None
+
+
+class TestDeviceClassInferredFromUnit:
+    """params.json overloads "battery"; the unit says what the value really is."""
+
+    def test_infer_from_unit_directly(self) -> None:
+        """The unit table covers the electrical units params.json uses."""
+        assert _infer_device_class_from_unit("V") == "voltage"
+        assert _infer_device_class_from_unit("mV") == "voltage"
+        assert _infer_device_class_from_unit("A") == "current"
+        assert _infer_device_class_from_unit("mA") == "current"
+        assert _infer_device_class_from_unit("kW") == "power"
+        assert _infer_device_class_from_unit("kWh") == "energy_storage"
+
+    def test_infer_is_case_insensitive_and_trims(self) -> None:
+        """Units are compared case-insensitively."""
+        assert _infer_device_class_from_unit(" v ") == "voltage"
+        assert _infer_device_class_from_unit("KWH") == "energy_storage"
+
+    def test_units_with_no_ha_device_class(self) -> None:
+        """Ah has no Home Assistant device class, so no class is invented."""
+        assert _infer_device_class_from_unit("Ah") is None
+        assert _infer_device_class_from_unit("") is None
+        assert _infer_device_class_from_unit(None) is None
+
+    def test_battery_with_voltage_unit(self) -> None:
+        """A "battery" param measured in volts is a voltage sensor.
+
+        HA accepts only "%" for the battery device class, so these used to
+        lose their class entirely.
+        """
+        assert get_param_device_class("LV_V") == "voltage"
+        assert get_param_device_class("AC_C_V") == "voltage"
+
+    def test_battery_with_percent_unit_is_untouched(self) -> None:
+        """A real state-of-charge percentage keeps the battery class."""
+        assert get_param_device_class("SOC") == "battery"
+        assert get_param_device_class("SOC_MIN") == "battery"
+
+    def test_battery_with_unmappable_unit(self) -> None:
+        """Ah is battery-related but has no device class; better none than wrong."""
+        assert get_param_device_class("HV_CAPACITY") is None
+        assert get_param_device_class("BATT_CAPACITY") is None
+
+    def test_non_battery_classes_are_untouched(self) -> None:
+        """Only the overloaded "battery" class is reinterpreted."""
+        assert get_param_device_class("HV_V") == "voltage"
+        assert get_param_device_class("COOLANT_TMP") == "temperature"
+        assert get_param_device_class("SPEED") == "speed"
+        assert get_param_device_class("THROTTLE") is None
