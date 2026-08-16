@@ -266,6 +266,10 @@ async def async_fetch_params_from_github(
 async def async_update_params_from_github(session: ClientSession) -> bool:
     """Fetch params.json from GitHub and update local file if changed.
 
+    Parameters that exist locally but not upstream are kept. Users running a
+    firmware fork add parameters for their own vehicle profile, and replacing
+    the file wholesale silently dropped them on the next setup.
+
     Args:
         session: aiohttp ClientSession to use for the request.
 
@@ -287,25 +291,41 @@ async def async_update_params_from_github(session: ClientSession) -> bool:
         _LOGGER.debug("params.json is up to date (hash: %s...)", current_hash[:8])
         return False
 
+    # Upstream wins on conflicts; locally added parameters are preserved.
+    merged_params = dict(new_params)
+    local_only = [key for key in _PARAMS if key not in new_params]
+    if local_only:
+        _LOGGER.debug(
+            "Keeping %d locally added parameter(s) not present upstream: %s",
+            len(local_only),
+            ", ".join(sorted(local_only)),
+        )
+        for key in local_only:
+            merged_params[key] = _PARAMS[key]
+
+    if merged_params == _PARAMS:
+        _LOGGER.debug("params.json content is already up to date")
+        return False
+
     # Write updated params to file
     params_file = _get_params_file_path()
     try:
         def _write_params() -> None:
             params_file.parent.mkdir(parents=True, exist_ok=True)
             with params_file.open("w", encoding="utf-8") as f:
-                json.dump(new_params, f, indent=2, ensure_ascii=False)
+                json.dump(merged_params, f, indent=2, ensure_ascii=False)
 
         await asyncio.to_thread(_write_params)
 
         _LOGGER.info(
             "Updated params.json from GitHub: %d parameters (hash: %s...)",
-            len(new_params),
+            len(merged_params),
             new_hash[:8] if new_hash else "unknown",
         )
 
         # Update in-memory params
         _PARAMS.clear()
-        _PARAMS.update(new_params)
+        _PARAMS.update(merged_params)
     except OSError as err:
         _LOGGER.warning("Failed to write updated params.json: %s", err)
         return False
