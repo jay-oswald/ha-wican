@@ -1,7 +1,11 @@
 from dataclasses import dataclass, field
 
 from homeassistant.components.binary_sensor import BinarySensorEntityDescription
-from homeassistant.components.sensor import SensorDeviceClass, SensorEntityDescription
+from homeassistant.components.sensor import (
+    SensorDeviceClass,
+    SensorEntityDescription,
+    SensorStateClass,
+)
 from homeassistant.helpers.entity import EntityCategory
 
 
@@ -33,6 +37,7 @@ SENSOR_DESCRIPTIONS: tuple[WiCANSensorEntityDescription, ...] = (
         icon="mdi:car-battery",
         device_class=SensorDeviceClass.VOLTAGE,
         native_unit_of_measurement="V",
+        state_class=SensorStateClass.MEASUREMENT,
         suggested_display_precision=1,
         extra_attributes=[
             "batt_alert",

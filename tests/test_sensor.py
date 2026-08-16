@@ -299,3 +299,44 @@ async def test_sensor_state_restoration_with_normalization(hass: HomeAssistant) 
 
 
 
+
+
+async def test_batt_voltage_is_a_measurement(
+    hass: HomeAssistant,
+    init_integration: MockConfigEntry,
+    mock_webhook_data: dict,
+    hass_client,
+) -> None:
+    """The device's own 12V reading is recorded as a measurement.
+
+    It had a device class, a unit and a display precision but no state
+    class, so it produced no long-term statistics - the same defect the
+    dynamic PID sensors had.
+    """
+    entry = init_integration
+    client = await hass_client()
+    await client.post(
+        f"/api/webhook/{entry.data[CONF_WEBHOOK_ID]}", json=mock_webhook_data,
+    )
+    await hass.async_block_till_done()
+
+    state = hass.states.get("sensor.wican_device_batt_voltage")
+    assert state is not None
+    assert state.attributes.get("state_class") == "measurement"
+    assert state.attributes.get("device_class") == "voltage"
+    assert state.attributes.get("unit_of_measurement") == "V"
+
+
+async def test_text_sensors_have_no_state_class(
+    hass: HomeAssistant,
+    init_integration: MockConfigEntry,
+) -> None:
+    """The diagnostic text sensors must not be measurements."""
+    for entity_id in (
+        "sensor.wican_device_wifi_mode",
+        "sensor.wican_device_vpn_status",
+        "sensor.wican_device_uptime",
+    ):
+        state = hass.states.get(entity_id)
+        assert state is not None, entity_id
+        assert state.attributes.get("state_class") is None, entity_id
