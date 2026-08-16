@@ -1202,3 +1202,55 @@ async def test_device_class_dropped_when_ha_rejects_the_unit(
     assert cat_state is not None
     assert cat_state.attributes.get("device_class") is None
     assert cat_state.attributes.get("unit_of_measurement") is None
+
+
+async def test_pid_sensors_get_display_precision(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+) -> None:
+    """PIDs with a device class get a sensible number of decimals.
+
+    Without one HA renders whatever the device sends: ODOMETER came through
+    as 50339.1443967231 after the km->mi conversion, while HV_V arrived as
+    345 with no decimals because the firmware's JSON drops the fraction on
+    integral values.
+    """
+    entry_data = mock_config_entry.data.copy()
+    entry_data["pid_keys"] = ["ODOMETER", "HV_V", "BATT_TEMP", "MOTOR_RPM"]
+    entry_data["config"] = {
+        "ODOMETER": {"unit": "km", "class": "distance"},
+        "HV_V": {"unit": "V", "class": "voltage"},
+        "BATT_TEMP": {"unit": "°C", "class": "temperature"},
+        # rpm has no HA device class, so no precision should be invented
+        "MOTOR_RPM": {"unit": "rpm", "class": "speed"},
+    }
+    mock_config_entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="WiCAN Device",
+        data=entry_data,
+        options=mock_config_entry.options,
+        unique_id=mock_config_entry.unique_id,
+    )
+    mock_config_entry.add_to_hass(hass)
+
+    with patch(
+        "custom_components.wican.async_get_clientsession",
+    ), patch(
+        "custom_components.wican.WiCANDataUpdateCoordinator.async_config_entry_first_refresh",
+    ):
+        assert await hass.config_entries.async_setup(mock_config_entry.entry_id)
+        await hass.async_block_till_done()
+
+    entity_registry = er.async_get(hass)
+
+    def precision(entity_id: str) -> int | None:
+        entry = entity_registry.async_get(entity_id)
+        assert entry is not None, entity_id
+        return entry.options.get("sensor", {}).get("suggested_display_precision")
+
+    assert precision("sensor.wican_device_odometer") == 1
+    # Two decimals so per-cell voltage differences stay visible
+    assert precision("sensor.wican_device_hv_v") == 2
+    assert precision("sensor.wican_device_batt_temp") == 1
+    # No device class resolved (speed does not accept rpm), so no precision
+    assert precision("sensor.wican_device_motor_rpm") is None

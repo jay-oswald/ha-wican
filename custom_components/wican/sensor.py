@@ -45,6 +45,55 @@ _NON_NUMERIC_DEVICE_CLASSES: frozenset[SensorDeviceClass] = frozenset(
 )
 
 
+# How many decimals to show, per device class. The firmware sends whatever
+# the profile's expression produces: cJSON drops the fraction on integral
+# doubles, so HV_V arrives as 345 rather than 345.0, while a km->mi
+# conversion leaves ODOMETER reading 50339.1443967231. Without a suggested
+# precision Home Assistant renders both verbatim.
+#
+# This is display only - the native value is what HA converts and records -
+# and HA rescales it automatically when the unit is converted, so a value
+# stored in km still shows sensibly in miles.
+#
+# Voltage gets two decimals so per-cell differences stay visible: at one
+# decimal every HV_C_V_nnn reads 3.9 and the cell delta disappears.
+_DEFAULT_PRECISION: dict[SensorDeviceClass, int] = {
+    SensorDeviceClass.ATMOSPHERIC_PRESSURE: 0,
+    SensorDeviceClass.BATTERY: 1,
+    SensorDeviceClass.CURRENT: 1,
+    SensorDeviceClass.DISTANCE: 1,
+    SensorDeviceClass.DURATION: 0,
+    SensorDeviceClass.ENERGY: 2,
+    SensorDeviceClass.ENERGY_STORAGE: 2,
+    SensorDeviceClass.FREQUENCY: 0,
+    SensorDeviceClass.POWER: 2,
+    SensorDeviceClass.POWER_FACTOR: 1,
+    SensorDeviceClass.PRESSURE: 0,
+    SensorDeviceClass.SPEED: 0,
+    SensorDeviceClass.TEMPERATURE: 1,
+    SensorDeviceClass.VOLTAGE: 2,
+}
+
+
+def _get_pid_precision(device_class: SensorDeviceClass | None) -> int | None:
+    """Determine how many decimals a PID sensor should display.
+
+    Only PIDs with a device class get a precision. There is no sensible
+    blanket default: MOTOR_RPM, HV_AH_CHARGED and the cell-index PIDs carry
+    units Home Assistant has no device class for, and rendering rpm as
+    "0.00" would be worse than leaving it alone.
+
+    Args:
+        device_class: The resolved SensorDeviceClass, if any.
+
+    Returns:
+        A decimal count, or None to leave the value as the device reports it.
+    """
+    if device_class is None:
+        return None
+    return _DEFAULT_PRECISION.get(device_class)
+
+
 def _get_pid_unit(pid_key: str, config_unit: str | None = None) -> str | None:
     """Determine the appropriate unit for a PID sensor.
 
@@ -202,7 +251,7 @@ def _get_pid_state_class(
 DYNAMIC_PID_SENSORS = {}
 
 
-async def async_setup_entry(  # noqa: C901
+async def async_setup_entry(  # noqa: C901, PLR0915
     hass: HomeAssistant,
     config_entry: WiCANConfigEntry,
     async_add_entities: AddEntitiesCallback,
@@ -227,6 +276,7 @@ async def async_setup_entry(  # noqa: C901
         device_class = _normalize_device_class(config.get("class"), unit, pid_key)
         state_class = _get_pid_state_class(unit, device_class)
         icon = _get_pid_icon(pid_key, device_class)
+        precision = _get_pid_precision(device_class)
 
         _LOGGER.debug(
             "Restoring PID sensor %s with unit=%s, device_class=%s, state_class=%s, icon=%s",
@@ -239,6 +289,7 @@ async def async_setup_entry(  # noqa: C901
             device_class=device_class,
             native_unit_of_measurement=unit,
             state_class=state_class,
+            suggested_display_precision=precision,
             icon=icon,
         )
         entity = WiCANPidSensorEntity(config_entry, pid_key, entity_description)
@@ -264,6 +315,7 @@ async def async_setup_entry(  # noqa: C901
                 device_class = _normalize_device_class(config.get("class"), unit, pid_key)
                 state_class = _get_pid_state_class(unit, device_class)
                 icon = _get_pid_icon(pid_key, device_class)
+                precision = _get_pid_precision(device_class)
 
                 _LOGGER.debug(
                     "Creating new PID sensor %s with unit=%s, device_class=%s, state_class=%s, icon=%s",
@@ -276,6 +328,7 @@ async def async_setup_entry(  # noqa: C901
                     device_class=device_class,
                     native_unit_of_measurement=unit,
                     state_class=state_class,
+                    suggested_display_precision=precision,
                     icon=icon,
                 )
                 entity = WiCANPidSensorEntity(config_entry, pid_key, entity_description)
