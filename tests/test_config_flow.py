@@ -4,17 +4,22 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, patch
 
-import pytest
-
 from homeassistant import config_entries
 from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
-from homeassistant.helpers.service_info.zeroconf import ZeroconfServiceInfo
+import pytest
+
+# ZeroconfServiceInfo moved between HA releases: see config_flow.py for the
+# same compatibility dance.
+try:
+    from homeassistant.components.zeroconf import ZeroconfServiceInfo
+except ImportError:
+    from homeassistant.helpers.service_info.zeroconf import ZeroconfServiceInfo
+
 from homeassistant.const import CONF_NAME, CONF_WEBHOOK_ID
+from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.wican.const import DOMAIN
-
-from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 
 async def test_user_flow_success(
