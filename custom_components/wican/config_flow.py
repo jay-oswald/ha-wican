@@ -129,10 +129,13 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         _LOGGER.info("WiCAN discovered via Zeroconf: name=%s hostname=%s url=%s", name, hostname, mdns_url)
 
-        # Store discovery info for confirmation step
+        # Store discovery info for confirmation step. Zeroconf hostnames are
+        # fully qualified and end in a dot ("wican_xxx.local."); using that
+        # verbatim as the device name leaves every entity called
+        # "wican_xxx.local. batt_voltage".
         self.discovered_mdns = mdns_url
         self.discovered_host = host_url
-        self.discovered_name = hostname or name
+        self.discovered_name = (hostname or name).rstrip(".") or None
         self.discovered_unique_id = unique_id
         self.discovered_mac = mac_address
         self.discovered_device_id = device_id

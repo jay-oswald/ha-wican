@@ -19,6 +19,50 @@ if TYPE_CHECKING:
     from . import WiCANConfigEntry
 
 
+def build_device_info(config_entry: WiCANConfigEntry) -> DeviceInfo:
+    """Build the device registry entry for a WiCAN device.
+
+    Every platform must agree on this, in particular on the name: the
+    device_tracker used to hardcode "WiCAN Device" while everything else used
+    the config entry title, and since both register under the same
+    identifiers the device ended up named inconsistently and the tracker's
+    entity_id was derived from the wrong one.
+
+    Args:
+        config_entry: The config entry the entity belongs to.
+
+    Returns:
+        DeviceInfo describing the device.
+    """
+    info = config_entry.data
+    config_url = info.get("mdns")
+    if not isinstance(config_url, str) or not config_url.startswith("http"):
+        config_url = None
+
+    # Use device_id or MAC as stable identifier (survives hostname changes)
+    device_id = info.get("device_id") or config_entry.entry_id
+
+    device_info_dict = {
+        "identifiers": {(DOMAIN, device_id)},
+        "manufacturer": "MeatPi",
+        "model": info.get("hw_version", "Unknown"),
+        "name": config_entry.title,
+        "sw_version": info.get("fw_version", "Unknown"),
+        "configuration_url": config_url,
+    }
+
+    # Add MAC address connection if available (from firmware)
+    mac_address = info.get("mac")
+    if mac_address:
+        device_info_dict["connections"] = {(CONNECTION_NETWORK_MAC, mac_address)}
+
+    # Add serial number if device_id available
+    if info.get("device_id"):
+        device_info_dict["serial_number"] = info.get("device_id")
+
+    return DeviceInfo(**device_info_dict)
+
+
 class WiCANEntity(CoordinatorEntity[WiCANDataUpdateCoordinator]):
     """Base entity using DataUpdateCoordinator."""
 
@@ -74,31 +118,4 @@ class WiCANEntity(CoordinatorEntity[WiCANDataUpdateCoordinator]):
     @property
     def device_info(self) -> DeviceInfo:
         """Return device info."""
-        info = self.config_entry.data
-        config_url = info.get("mdns")
-        if not isinstance(config_url, str) or not config_url.startswith("http"):
-            config_url = None
-
-        # Use device_id or MAC as stable identifier (survives hostname changes)
-        device_id = info.get("device_id") or self.config_entry.entry_id
-
-        # Build device info with MAC connection if available
-        device_info_dict = {
-            "identifiers": {(DOMAIN, device_id)},
-            "manufacturer": "MeatPi",
-            "model": info.get("hw_version", "Unknown"),
-            "name": self.config_entry.title,
-            "sw_version": info.get("fw_version", "Unknown"),
-            "configuration_url": config_url,
-        }
-
-        # Add MAC address connection if available (from firmware)
-        mac_address = info.get("mac")
-        if mac_address:
-            device_info_dict["connections"] = {(CONNECTION_NETWORK_MAC, mac_address)}
-
-        # Add serial number if device_id available
-        if info.get("device_id"):
-            device_info_dict["serial_number"] = info.get("device_id")
-
-        return DeviceInfo(**device_info_dict)
+        return build_device_info(self.config_entry)

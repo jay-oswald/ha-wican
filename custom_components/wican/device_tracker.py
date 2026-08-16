@@ -11,13 +11,13 @@ from typing import TYPE_CHECKING, Any
 
 from homeassistant.components.device_tracker import SourceType, TrackerEntity
 from homeassistant.core import HomeAssistant, callback
-from homeassistant.helpers.device_registry import CONNECTION_NETWORK_MAC, DeviceInfo
 from homeassistant.helpers.restore_state import RestoreEntity
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import DOMAIN
+from .entity import build_device_info
 
 if TYPE_CHECKING:
+    from homeassistant.helpers.device_registry import DeviceInfo
     from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
     from . import WiCANConfigEntry
@@ -80,31 +80,9 @@ class WiCANDeviceTrackerEntity(CoordinatorEntity, TrackerEntity, RestoreEntity):
         self._heading: float | None = None
 
     @property
-    def device_info(self):
+    def device_info(self) -> DeviceInfo:
         """Return device info for this entity."""
-        info = self.config_entry.data
-        device_id = info.get("device_id") or self.config_entry.entry_id
-        config_url = info.get("mdns")
-        if not isinstance(config_url, str) or not config_url.startswith("http"):
-            config_url = None
-
-        device_info_dict = {
-            "identifiers": {(DOMAIN, device_id)},
-            "manufacturer": "MeatPi",
-            "model": info.get("hw_version", "Unknown"),
-            "name": "WiCAN Device",
-            "sw_version": info.get("fw_version", "Unknown"),
-            "configuration_url": config_url,
-        }
-
-        mac_address = info.get("mac")
-        if mac_address:
-            device_info_dict["connections"] = {(CONNECTION_NETWORK_MAC, mac_address)}
-
-        if info.get("device_id"):
-            device_info_dict["serial_number"] = info.get("device_id")
-
-        return DeviceInfo(**device_info_dict)
+        return build_device_info(self.config_entry)
 
     @property
     def source_type(self) -> SourceType:
