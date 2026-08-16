@@ -713,6 +713,39 @@ def get_param_device_class(param_name: str) -> str | None:
     return None
 
 
+# Params that report a monotonically increasing lifetime total rather than an
+# instantaneous measurement. HA's "total_increasing" state class is built for
+# exactly this shape of data: a decrease is treated as the start of a new
+# accumulation cycle (e.g. an odometer rollover, or DIST_SINCE_FULL_CHARGE
+# resetting to 0 at every full charge) rather than graphed as a drop.
+_LIFETIME_COUNTER_PIDS: Final[frozenset[str]] = frozenset(
+    {
+        "KWH_CHARGED",
+        "KWH_DISCHARGED",
+        "HV_AH_CHARGED",
+        "HV_AH_DISCHARGED",
+        "ODOMETER",
+        "ODOMETER_MI",
+        "DIST_SINCE_FULL_CHARGE",
+    },
+)
+
+
+def get_param_state_class(param_name: str) -> str | None:
+    """Get the suggested state class for a parameter, if it is a known lifetime counter.
+
+    Args:
+        param_name: Parameter name (case-insensitive, supports various formats).
+
+    Returns:
+        "total_increasing" for known lifetime counters, None otherwise.
+    """
+    key = _normalize_param_name(param_name)
+    if key in _LIFETIME_COUNTER_PIDS:
+        return "total_increasing"
+    return None
+
+
 def get_param_icon(param_name: str, device_class: str | None = None) -> str:
     """Get the icon for a parameter.
 

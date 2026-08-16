@@ -1202,3 +1202,130 @@ async def test_device_class_dropped_when_ha_rejects_the_unit(
     assert cat_state is not None
     assert cat_state.attributes.get("device_class") is None
     assert cat_state.attributes.get("unit_of_measurement") is None
+
+
+async def test_energy_counters_use_total_increasing(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+) -> None:
+    """Cumulative energy PIDs get a state class HA accepts for device_class energy.
+
+    Regression test for the two errors this produced in the log:
+    "using state class 'measurement' which is impossible considering device
+    class ('energy')".
+    """
+    entry_data = mock_config_entry.data.copy()
+    entry_data["pid_keys"] = ["KWH_CHARGED", "KWH_DISCHARGED"]
+    entry_data["config"] = {
+        "KWH_CHARGED": {"unit": "kWh", "class": "energy"},
+        "KWH_DISCHARGED": {"unit": "kWh", "class": "energy"},
+    }
+    mock_config_entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="WiCAN Device",
+        data=entry_data,
+        options=mock_config_entry.options,
+        unique_id=mock_config_entry.unique_id,
+    )
+    mock_config_entry.add_to_hass(hass)
+
+    with patch(
+        "custom_components.wican.async_get_clientsession",
+    ), patch(
+        "custom_components.wican.WiCANDataUpdateCoordinator.async_config_entry_first_refresh",
+    ):
+        assert await hass.config_entries.async_setup(mock_config_entry.entry_id)
+        await hass.async_block_till_done()
+
+    for entity_id in (
+        "sensor.wican_device_kwh_charged",
+        "sensor.wican_device_kwh_discharged",
+    ):
+        state = hass.states.get(entity_id)
+        assert state is not None, entity_id
+        assert state.attributes.get("device_class") == "energy", entity_id
+        assert state.attributes.get("state_class") == "total_increasing", entity_id
+
+
+async def test_energy_levels_use_energy_storage(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+) -> None:
+    """Capacity/remaining PIDs are levels, so they keep a measurement state class.
+
+    params.json classes them "energy", which forbids measurement; energy_storage
+    is the device class for a level and permits it.
+    """
+    entry_data = mock_config_entry.data.copy()
+    entry_data["pid_keys"] = ["HV_CAPACITY_KWH", "HV_KWH_R"]
+    entry_data["config"] = {
+        "HV_CAPACITY_KWH": {"unit": "kWh", "class": "energy"},
+        "HV_KWH_R": {"unit": "Wh", "class": "energy"},
+    }
+    mock_config_entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="WiCAN Device",
+        data=entry_data,
+        options=mock_config_entry.options,
+        unique_id=mock_config_entry.unique_id,
+    )
+    mock_config_entry.add_to_hass(hass)
+
+    with patch(
+        "custom_components.wican.async_get_clientsession",
+    ), patch(
+        "custom_components.wican.WiCANDataUpdateCoordinator.async_config_entry_first_refresh",
+    ):
+        assert await hass.config_entries.async_setup(mock_config_entry.entry_id)
+        await hass.async_block_till_done()
+
+    for entity_id in (
+        "sensor.wican_device_hv_capacity_kwh",
+        "sensor.wican_device_hv_kwh_r",
+    ):
+        state = hass.states.get(entity_id)
+        assert state is not None, entity_id
+        assert state.attributes.get("device_class") == "energy_storage", entity_id
+        assert state.attributes.get("state_class") == "measurement", entity_id
+
+
+async def test_odometer_uses_total_increasing(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+) -> None:
+    """Lifetime counters get total_increasing even where measurement is allowed.
+
+    distance permits measurement, so HA does not complain, but an odometer's
+    statistics only make sense as an accumulating total.
+    """
+    entry_data = mock_config_entry.data.copy()
+    entry_data["pid_keys"] = ["ODOMETER", "RANGE"]
+    entry_data["config"] = {
+        "ODOMETER": {"unit": "km", "class": "distance"},
+        "RANGE": {"unit": "km", "class": "distance"},
+    }
+    mock_config_entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="WiCAN Device",
+        data=entry_data,
+        options=mock_config_entry.options,
+        unique_id=mock_config_entry.unique_id,
+    )
+    mock_config_entry.add_to_hass(hass)
+
+    with patch(
+        "custom_components.wican.async_get_clientsession",
+    ), patch(
+        "custom_components.wican.WiCANDataUpdateCoordinator.async_config_entry_first_refresh",
+    ):
+        assert await hass.config_entries.async_setup(mock_config_entry.entry_id)
+        await hass.async_block_till_done()
+
+    odo = hass.states.get("sensor.wican_device_odometer")
+    assert odo is not None
+    assert odo.attributes.get("state_class") == "total_increasing"
+
+    # RANGE is an instantaneous reading with the same device class
+    rng = hass.states.get("sensor.wican_device_range")
+    assert rng is not None
+    assert rng.attributes.get("state_class") == "measurement"
