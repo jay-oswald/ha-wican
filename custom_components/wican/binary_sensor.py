@@ -17,7 +17,12 @@ from homeassistant.helpers.restore_state import RestoreEntity
 from .attributes import BINARY_SENSOR_DESCRIPTIONS, WiCANBinarySensorEntityDescription, get_sensor_attributes
 from .const import DOMAIN
 from .entity import WiCANEntity
-from .param_loader import get_param_device_class, get_param_icon, is_binary_sensor
+from .param_loader import (
+    get_param_device_class,
+    get_param_display_name,
+    get_param_icon,
+    is_binary_sensor,
+)
 
 if TYPE_CHECKING:
     from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -125,7 +130,7 @@ def _build_pid_binary_sensor(
 
     entity_description = WiCANBinarySensorEntityDescription(
         key=pid_key,
-        name=pid_key,
+        name=get_param_display_name(pid_key),
         device_class=device_class,
         icon=icon,
     )

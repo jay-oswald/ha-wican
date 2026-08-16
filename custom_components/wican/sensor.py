@@ -17,6 +17,7 @@ from .const import DOMAIN
 from .entity import WiCANEntity
 from .param_loader import (
     get_param_device_class,
+    get_param_display_name,
     get_param_icon,
     get_param_unit,
     is_binary_sensor,
@@ -176,7 +177,7 @@ async def async_setup_entry(  # noqa: C901, PLR0915
 
         entity_description = WiCANSensorEntityDescription(
             key=pid_key,
-            name=pid_key,
+            name=get_param_display_name(pid_key),
             device_class=device_class,
             native_unit_of_measurement=unit,
             state_class="measurement",
@@ -215,7 +216,7 @@ async def async_setup_entry(  # noqa: C901, PLR0915
 
                 entity_description = WiCANSensorEntityDescription(
                     key=pid_key,
-                    name=pid_key,
+                    name=get_param_display_name(pid_key),
                     device_class=device_class,
                     native_unit_of_measurement=unit,
                     icon=icon,
