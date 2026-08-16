@@ -249,3 +249,40 @@ async def test_binary_sensor_none_checks(hass: HomeAssistant, hass_client) -> No
     # Verify entities exist and didn't crash
     state = hass.states.get("binary_sensor.wican_test_ble_status")
     assert state is not None
+
+
+async def test_binary_sensor_extra_attributes_populated(
+    hass: HomeAssistant,
+    init_integration: MockConfigEntry,
+    mock_webhook_data: dict,
+    hass_client,
+) -> None:
+    """Extra attributes declared on the description reach the entity state.
+
+    Regression test: the handler passed the description's key instead of the
+    description itself, so extra_attributes was always looked up on a string
+    and every binary sensor reported an empty attribute set.
+    """
+    entry = init_integration
+    webhook_id = entry.data[CONF_WEBHOOK_ID]
+
+    data = dict(mock_webhook_data)
+    data["status"] = {
+        **mock_webhook_data["status"],
+        "ble_status": "enable",
+        "ble_power": "9",
+        "ecu_status": "online",
+        "obd_chip_status": "ready",
+    }
+
+    client = await hass_client()
+    await client.post(f"/api/webhook/{webhook_id}", json=data)
+    await hass.async_block_till_done()
+
+    ble_state = hass.states.get("binary_sensor.wican_device_ble_status")
+    assert ble_state is not None
+    assert ble_state.attributes.get("ble_power") == "9"
+
+    ecu_state = hass.states.get("binary_sensor.wican_device_ecu_status")
+    assert ecu_state is not None
+    assert ecu_state.attributes.get("obd_chip_status") == "ready"
