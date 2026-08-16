@@ -9,8 +9,10 @@ import pytest
 from homeassistant.const import CONF_WEBHOOK_ID
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers.dispatcher import async_dispatcher_send
 
 from custom_components.wican.const import DOMAIN
+from custom_components.wican.sensor import DYNAMIC_PID_SENSORS
 
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
@@ -299,3 +301,54 @@ async def test_sensor_state_restoration_with_normalization(hass: HomeAssistant) 
 
 
 
+
+
+async def test_dynamic_pid_map_cleared_on_unload(
+    hass: HomeAssistant,
+    init_integration: MockConfigEntry,
+    mock_webhook_data: dict,
+    hass_client,
+) -> None:
+    """The module-level entity map does not outlive the config entry.
+
+    DYNAMIC_PID_SENSORS is keyed by entry id and was only ever assigned, so
+    every removed entry left its entities behind for the lifetime of the
+    process.
+    """
+    entry = init_integration
+    webhook_id = entry.data[CONF_WEBHOOK_ID]
+
+    data = dict(mock_webhook_data)
+    data["autopid_data"] = {"SOC": 62}
+    data["config"] = {"SOC": {"unit": "%", "class": "battery"}}
+
+    client = await hass_client()
+    await client.post(f"/api/webhook/{webhook_id}", json=data)
+    await hass.async_block_till_done()
+
+    assert entry.entry_id in DYNAMIC_PID_SENSORS
+    assert "SOC" in DYNAMIC_PID_SENSORS[entry.entry_id]
+
+    assert await hass.config_entries.async_unload(entry.entry_id)
+    await hass.async_block_till_done()
+
+    assert entry.entry_id not in DYNAMIC_PID_SENSORS
+
+
+async def test_webhook_after_unload_is_ignored(
+    hass: HomeAssistant,
+    init_integration: MockConfigEntry,
+    mock_webhook_data: dict,
+) -> None:
+    """A webhook still in flight when the entry unloads does not raise."""
+    entry = init_integration
+
+    assert await hass.config_entries.async_unload(entry.entry_id)
+    await hass.async_block_till_done()
+
+    data = dict(mock_webhook_data)
+    data["autopid_data"] = {"SOC": 62}
+    data["config"] = {"SOC": {"unit": "%", "class": "battery"}}
+
+    async_dispatcher_send(hass, DOMAIN, entry.data[CONF_WEBHOOK_ID], data)
+    await hass.async_block_till_done()

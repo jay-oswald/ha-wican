@@ -137,10 +137,12 @@ def _normalize_device_class(
     return device_class
 
 
+# Entities created dynamically from webhook data, keyed by config entry id.
+# Entries are dropped when the config entry unloads - see _async_forget_entry().
 DYNAMIC_PID_SENSORS = {}
 
 
-async def async_setup_entry(  # noqa: C901
+async def async_setup_entry(  # noqa: C901, PLR0915
     hass: HomeAssistant,
     config_entry: WiCANConfigEntry,
     async_add_entities: AddEntitiesCallback,
@@ -153,6 +155,13 @@ async def async_setup_entry(  # noqa: C901
     )
 
     DYNAMIC_PID_SENSORS[config_entry.entry_id] = {}
+
+    @callback
+    def _async_forget_entry() -> None:
+        """Drop this entry's entity map so removed entries leave nothing behind."""
+        DYNAMIC_PID_SENSORS.pop(config_entry.entry_id, None)
+
+    config_entry.async_on_unload(_async_forget_entry)
 
     # Restore PID sensors from config entry
     pid_keys = config_entry.data.get("pid_keys", [])
@@ -191,7 +200,11 @@ async def async_setup_entry(  # noqa: C901
 
         pid_config = data.get("config", {})
         new_entities = []
-        sensors = DYNAMIC_PID_SENSORS[config_entry.entry_id]
+        # A webhook can already be queued when the entry unloads, so the map
+        # may be gone by the time this task runs.
+        sensors = DYNAMIC_PID_SENSORS.get(config_entry.entry_id)
+        if sensors is None:
+            return
 
         for pid_key in pid_data:
             if pid_key not in sensors:
