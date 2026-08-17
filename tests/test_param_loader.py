@@ -9,6 +9,7 @@ from custom_components.wican.param_loader import (
     get_param_device_class,
     get_param_icon,
     get_param_description,
+    get_param_display_name,
     is_binary_sensor,
     get_all_params,
      is_valid_device_class,
@@ -467,3 +468,21 @@ class TestGitHubParamsUpdate:
         params = get_all_params()
         assert isinstance(params, dict)
         assert "SOC" in params  # Known param should still exist
+
+
+class TestGetParamDisplayName:
+    """Tests for get_param_display_name function."""
+
+    def test_uses_the_description(self) -> None:
+        """params.json already carries a readable name for every param."""
+        assert get_param_display_name("SOC") == "State Of Charge"
+        assert get_param_display_name("HV_V") == "High Voltage Battery Voltage"
+
+    def test_falls_back_to_the_key(self) -> None:
+        """A PID with no description - unknown, or a hex-prefixed standard
+        PID alias that params.json has never heard of - keeps the raw key
+        the device gave it. Resolving those aliases to a real name needs the
+        fallback table from fix-standard-pid-fallbacks, not present here.
+        """
+        assert get_param_display_name("SOME_CUSTOM_PID") == "SOME_CUSTOM_PID"
+        assert get_param_display_name("42-ControlModuleVolt") == "42-ControlModuleVolt"

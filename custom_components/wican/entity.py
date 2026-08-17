@@ -35,7 +35,12 @@ class WiCANEntity(CoordinatorEntity[WiCANDataUpdateCoordinator]):
         self._attr_unique_id = f"{config_entry.entry_id}_{entity_description.key}"
         self.entity_description = entity_description
         self.webhook_id = config_entry.runtime_data.webhook_id
-        self._attr_name = entity_description.key
+        # Deliberately no _attr_name: it takes priority over translation_key
+        # in Entity._name_internal(), so setting it here made every name in
+        # translations/en.json dead and left the static sensors called
+        # "batt_voltage" rather than "Battery Voltage". Platforms that have no
+        # translation set entity_description.name instead, which is consulted
+        # after the translation.
         self._attr_device_info = DeviceInfo(
             connections={(DOMAIN, config_entry.entry_id)},
             manufacturer="MeatPi",
@@ -70,6 +75,20 @@ class WiCANEntity(CoordinatorEntity[WiCANDataUpdateCoordinator]):
         """Handle updated data from the coordinator."""
         # Default implementation - subclasses should override this
         self.async_write_ha_state()
+
+    @property
+    def suggested_object_id(self) -> str | None:
+        """Derive the entity id from the raw key, not the display name.
+
+        Home Assistant builds an entity id from the entity's name by default,
+        so improving the names would have renamed every entity id on new
+        installs while leaving existing ones on the old scheme - two installs
+        of the same version disagreeing about what to call the same sensor.
+        Keying it off the raw key keeps ids stable and predictable
+        (sensor.<device>_batt_voltage, sensor.<device>_soc) whatever the
+        display name says.
+        """
+        return self.entity_description.key
 
     @property
     def device_info(self) -> DeviceInfo:

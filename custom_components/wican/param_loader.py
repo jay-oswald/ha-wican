@@ -641,6 +641,22 @@ def get_param_device_class(param_name: str) -> str | None:
     return None
 
 
+def get_param_display_name(param_name: str) -> str:
+    """Get a human-readable name for a parameter.
+
+    params.json already carries a description for every parameter it knows
+    ("Cell Voltage 001", "Control Module Voltage", "State Of Charge"), which
+    reads far better than the raw key the device sends.
+
+    Args:
+        param_name: Parameter name (case-insensitive, supports various formats).
+
+    Returns:
+        The parameter's description, or the key unchanged when there is none.
+    """
+    return get_param_description(param_name) or param_name
+
+
 def get_param_icon(param_name: str, device_class: str | None = None) -> str:
     """Get the icon for a parameter.
 

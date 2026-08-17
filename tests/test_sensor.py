@@ -299,3 +299,92 @@ async def test_sensor_state_restoration_with_normalization(hass: HomeAssistant) 
 
 
 
+
+
+async def test_entity_names_come_from_translations_and_descriptions(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+) -> None:
+    """Static sensors use their translation, PID sensors use params.json.
+
+    WiCANEntity used to set _attr_name to the raw key, which takes priority
+    over translation_key in Entity._name_internal() - so every name in
+    translations/en.json was dead and PID sensors were called HV_V.
+    """
+    entry_data = dict(mock_config_entry.data)
+    entry_data["pid_keys"] = ["SOC", "HV_V", "UNKNOWN_PID"]
+    entry_data["config"] = {
+        "SOC": {"unit": "%", "class": "battery"},
+        "HV_V": {"unit": "V", "class": "battery"},
+        "UNKNOWN_PID": {"unit": "", "class": "none"},
+    }
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="WiCAN Device",
+        data=entry_data,
+        options=mock_config_entry.options,
+        unique_id=mock_config_entry.unique_id,
+    )
+    entry.add_to_hass(hass)
+
+    with patch(
+        "custom_components.wican._async_register_webhook_on_device",
+        return_value=True,
+    ):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+    def friendly(entity_id: str) -> str | None:
+        state = hass.states.get(entity_id)
+        assert state is not None, entity_id
+        return state.attributes.get("friendly_name")
+
+    # Static sensor, named by translations/en.json
+    assert friendly("sensor.wican_device_batt_voltage") == "WiCAN Device Battery Voltage"
+    # PID sensors, named by their params.json description
+    assert friendly("sensor.wican_device_soc") == "WiCAN Device State Of Charge"
+    assert friendly("sensor.wican_device_hv_v") == "WiCAN Device High Voltage Battery Voltage"
+    # A PID params.json has never heard of keeps its raw key
+    assert friendly("sensor.wican_device_unknown_pid") == "WiCAN Device UNKNOWN_PID"
+
+
+async def test_entity_ids_stay_keyed_on_the_raw_pid(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+) -> None:
+    """Renaming the entities must not renumber their entity ids.
+
+    HA derives an entity id from the name, so without suggested_object_id a
+    fresh install would get sensor.<device>_state_of_charge while an existing
+    one kept sensor.<device>_soc.
+    """
+    entry_data = dict(mock_config_entry.data)
+    entry_data["pid_keys"] = ["SOC", "HV_V"]
+    entry_data["config"] = {
+        "SOC": {"unit": "%", "class": "battery"},
+        "HV_V": {"unit": "V", "class": "battery"},
+    }
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="WiCAN Device",
+        data=entry_data,
+        options=mock_config_entry.options,
+        unique_id=mock_config_entry.unique_id,
+    )
+    entry.add_to_hass(hass)
+
+    with patch(
+        "custom_components.wican._async_register_webhook_on_device",
+        return_value=True,
+    ):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+    entity_registry = er.async_get(hass)
+    for entity_id in (
+        "sensor.wican_device_batt_voltage",
+        "sensor.wican_device_wifi_mode",
+        "sensor.wican_device_soc",
+        "sensor.wican_device_hv_v",
+    ):
+        assert entity_registry.async_get(entity_id) is not None, entity_id
