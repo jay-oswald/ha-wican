@@ -351,6 +351,7 @@ async def async_setup_entry(  # noqa: C901, PLR0915
     # Normalize host/mdns schemes BEFORE scheduling registration
     # to avoid triggering update listener which would cause duplicate registrations
     _normalize_connection_urls(hass, entry)
+    _normalize_entry_title(hass, entry)
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
@@ -367,6 +368,24 @@ async def async_unload_entry(
     """Unload a config entry."""
     webhook.async_unregister(hass, entry.runtime_data.webhook_id)
     return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+
+
+def _normalize_entry_title(hass: HomeAssistant, entry: WiCANConfigEntry) -> None:
+    """Drop the trailing dot a zeroconf hostname carries.
+
+    Entries created before this was fixed are titled with the fully qualified
+    hostname ("wican_xxx.local."), and since the title is the device name
+    every entity ends up called "wican_xxx.local. batt_voltage".
+
+    Runs alongside _normalize_connection_urls() during setup, before the
+    update listener is registered, for the same reason: updating the entry
+    later would re-register the webhook on the device.
+    """
+    title = entry.title
+    normalized = title.rstrip(".")
+    if normalized and normalized != title:
+        _LOGGER.debug("Normalizing entry title %r to %r", title, normalized)
+        hass.config_entries.async_update_entry(entry, title=normalized)
 
 
 def _normalize_connection_urls(hass: HomeAssistant, entry: WiCANConfigEntry) -> None:

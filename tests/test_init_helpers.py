@@ -16,6 +16,7 @@ from custom_components.wican import (
     _build_webhook_endpoint,
     _normalize_ip,
     _extract_request_ip,
+    _normalize_entry_title,
 )
 
 
@@ -261,3 +262,42 @@ def test_extract_request_ip_transport_empty_peername():
     
     result = _extract_request_ip(request)
     assert result == "10.0.0.6"
+
+
+def test_normalize_entry_title_strips_trailing_dot():
+    """A fully qualified zeroconf hostname loses its trailing dot."""
+    hass = MagicMock()
+    entry = MagicMock()
+    entry.title = "wican_70af09217a91.local."
+
+    _normalize_entry_title(hass, entry)
+
+    hass.config_entries.async_update_entry.assert_called_once_with(
+        entry, title="wican_70af09217a91.local",
+    )
+
+
+def test_normalize_entry_title_leaves_clean_titles_alone():
+    """An already-clean title does not trigger a config entry write.
+
+    Writing the entry fires the update listener, which re-registers the
+    webhook on the device.
+    """
+    hass = MagicMock()
+    entry = MagicMock()
+    entry.title = "wican_70af09217a91.local"
+
+    _normalize_entry_title(hass, entry)
+
+    hass.config_entries.async_update_entry.assert_not_called()
+
+
+def test_normalize_entry_title_ignores_all_dots():
+    """A title that is nothing but dots is left as-is rather than emptied."""
+    hass = MagicMock()
+    entry = MagicMock()
+    entry.title = "..."
+
+    _normalize_entry_title(hass, entry)
+
+    hass.config_entries.async_update_entry.assert_not_called()
