@@ -467,3 +467,63 @@ class TestGitHubParamsUpdate:
         params = get_all_params()
         assert isinstance(params, dict)
         assert "SOC" in params  # Known param should still exist
+
+class TestStandardPidFallbacks:
+    """Standard Mode 01 PIDs that params.json has never described."""
+
+    def test_control_module_voltage(self) -> None:
+        """PID 0x42 resolves through every alias spelling."""
+        for name in (
+            "42-ControlModuleVolt",
+            "42_ControlModuleVolt",
+            "ControlModuleVolt",
+            "CTRL_MOD_V",
+        ):
+            assert get_param_unit(name) == "V", name
+            assert get_param_device_class(name) == "voltage", name
+
+    def test_ambient_air_temperature(self) -> None:
+        """PID 0x46 resolves to the unit HA accepts for temperature."""
+        for name in ("46-AmbientAirTemp", "AmbientAirTemp", "AMBIENT_TMP"):
+            assert get_param_unit(name) == "°C", name
+            assert get_param_device_class(name) == "temperature", name
+
+    def test_remaining_gap_pids(self) -> None:
+        """The other four alias targets that pointed at nothing."""
+        assert get_param_unit("33-AbsBaroPres") == "kPa"
+        assert get_param_device_class("33-AbsBaroPres") == "pressure"
+
+        assert get_param_unit("21-DistanceMILOn") == "km"
+        assert get_param_device_class("21-DistanceMILOn") == "distance"
+
+        assert get_param_unit("04-CalcEngineLoad") == "%"
+        assert get_param_device_class("04-CalcEngineLoad") is None
+
+        assert get_param_unit("0E-TimingAdvance") == "deg"
+        assert get_param_device_class("0E-TimingAdvance") is None
+
+    def test_descriptions_available(self) -> None:
+        """Fallbacks carry a description like params.json entries do."""
+        assert get_param_description("42-ControlModuleVolt") == "Control Module Voltage"
+        assert get_param_description("46-AmbientAirTemp") == "Ambient Air Temperature"
+
+    def test_fallbacks_are_not_binary_sensors(self) -> None:
+        """None of the fallbacks declare a binary_sensor type."""
+        for name in ("42-ControlModuleVolt", "46-AmbientAirTemp", "04-CalcEngineLoad"):
+            assert is_binary_sensor(name) is False, name
+
+    def test_icons_resolve(self) -> None:
+        """PIDs without a device class still get a meaningful icon."""
+        assert get_param_icon("04-CalcEngineLoad", None) == "mdi:engine"
+        assert get_param_icon("0E-TimingAdvance", None) == "mdi:timer-cog-outline"
+
+    def test_params_json_still_wins(self) -> None:
+        """A name present in params.json is not shadowed by the fallbacks."""
+        assert get_param_unit("SOC") == "%"
+        assert get_param_unit("05-EngineCoolantTemp") == "°C"
+
+    def test_unknown_name_still_returns_none(self) -> None:
+        """Names in neither source keep returning None."""
+        assert get_param_unit("totally_unknown") is None
+        assert get_param_device_class("totally_unknown") is None
+        assert get_param_description("totally_unknown") is None
