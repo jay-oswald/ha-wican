@@ -55,6 +55,17 @@ class WiCANEntity(CoordinatorEntity[WiCANDataUpdateCoordinator]):
         """Register event callback."""
         await super().async_added_to_hass()
 
+        # Seed current state from the coordinator now that any subclass
+        # restore logic (which runs before this via super().async_added_to_hass())
+        # has had a chance to set a last-known value. Dynamically discovered
+        # PID entities are created from the very webhook payload that first
+        # reports them, so self.coordinator.data already holds their value by
+        # this point - but the listener registered above only fires on the
+        # *next* update, so without this the entity would show
+        # unknown/unavailable until then. Existing entities just get their
+        # already-current value written again, which is a harmless no-op.
+        self._handle_coordinator_update()
+
         # Keep dispatcher for backward compatibility during migration
         @callback
         def _handle_event_filtered(webhook_id: str, data: dict[str, str]) -> None:

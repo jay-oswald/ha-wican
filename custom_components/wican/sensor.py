@@ -301,7 +301,7 @@ class WiCANSensorEntity(WiCANEntity, RestoreSensor):
 class WiCANPidSensorEntity(WiCANEntity, RestoreSensor):
     """Dynamic PID sensor entity."""
 
-    __slots__ = ("_attr_native_value", "_pending_value", "_pid_key")
+    __slots__ = ("_attr_native_value", "_pid_key")
 
     entity_description: WiCANSensorEntityDescription
 
@@ -311,7 +311,6 @@ class WiCANPidSensorEntity(WiCANEntity, RestoreSensor):
         self._pid_key = pid_key
         self._attr_unique_id = f"{config_entry.entry_id}_pid_{pid_key}"
         self._attr_entity_category = None  # Regular sensor
-        self._pending_value = None
         self._attr_native_value = None  # Initialize to None
 
     def _handle_coordinator_update(self) -> None:
@@ -334,12 +333,8 @@ class WiCANPidSensorEntity(WiCANEntity, RestoreSensor):
         """
 
     async def async_added_to_hass(self) -> None:
-        """Restore entity state and set pending value if present."""
+        """Restore entity state."""
         state = await self.async_get_last_sensor_data()
         if state:
             self._attr_native_value = state.native_value
-        if self._pending_value is not None:
-            self._attr_native_value = self._pending_value
-            self.async_write_ha_state()
-            self._pending_value = None
         await super().async_added_to_hass()

@@ -30,8 +30,10 @@ async def test_coordinator_initialization(
     # Coordinator name is the domain (lowercase)
     assert coordinator.name == "wican"
     assert coordinator.update_interval == timedelta(minutes=5)
-    # Data is None until first update
-    assert coordinator.data is None
+    # Seeded with an empty dict rather than the DataUpdateCoordinator default
+    # of None, since this integration is push-based: there is no "first
+    # update" to wait for, and entities read coordinator.data unconditionally.
+    assert coordinator.data == {}
 
 
 async def test_coordinator_first_refresh(

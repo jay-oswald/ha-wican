@@ -299,3 +299,34 @@ async def test_sensor_state_restoration_with_normalization(hass: HomeAssistant) 
 
 
 
+
+
+async def test_new_pid_sensor_has_a_value_on_the_webhook_that_created_it(
+    hass: HomeAssistant,
+    init_integration: MockConfigEntry,
+    hass_client,
+) -> None:
+    """A first-seen PID must show its value immediately, not on the next update.
+
+    WiCANPidSensorEntity used to rely on a _pending_value set from
+    _async_handle_event(), a dispatcher callback that stopped running once
+    entity updates moved to the coordinator pattern. The entity was still
+    created with the value already in hand (the same webhook payload that
+    revealed the PID), but nothing ever wrote it, so the state stayed
+    unknown until a second, unrelated webhook arrived.
+    """
+    entry = init_integration
+    webhook_id = entry.data[CONF_WEBHOOK_ID]
+
+    data = {
+        "autopid_data": {"CTRL_MOD_V": 13.8},
+        "config": {"CTRL_MOD_V": {"unit": "V", "class": "voltage"}},
+    }
+
+    client = await hass_client()
+    await client.post(f"/api/webhook/{webhook_id}", json=data)
+    await hass.async_block_till_done()
+
+    state = hass.states.get("sensor.wican_device_ctrl_mod_v")
+    assert state is not None
+    assert state.state == "13.8"

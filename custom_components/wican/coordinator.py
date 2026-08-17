@@ -42,6 +42,12 @@ class WiCANDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             update_interval=UPDATE_INTERVAL,
             config_entry=config_entry,
         )
+        # DataUpdateCoordinator.data is None until a refresh completes, but
+        # entities read self.coordinator.data.get(...) unconditionally. This
+        # is push-based (see async_config_entry_first_refresh below), so
+        # there is nothing to wait for - seed it now instead of leaving a
+        # None that only stops being a footgun after the first webhook.
+        self.data = self._data
 
     async def _async_update_data(self) -> dict[str, Any]:
         """Fetch data from WiCAN device.
