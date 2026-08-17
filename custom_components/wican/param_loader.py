@@ -169,6 +169,78 @@ PARAM_NAME_ICONS: Final[dict[str, str]] = {
 DEFAULT_PARAM_ICON: Final[str] = "mdi:car-info"
 
 
+# Placeholder strings the firmware uses in the "unit" field to mean
+# "this value has no unit". "Encoded" is used by the 16 standard PIDs that
+# report packed bitfields (PIDsSupported, MonitorStatus, FuelSysStat, ...).
+_NON_UNITS: Final[frozenset[str]] = frozenset({"", "-", "encoded", "n/a", "none"})
+
+# Unit spellings used by the WiCAN firmware and by the upstream params.json
+# that Home Assistant does not recognise, mapped to the spelling HA expects.
+#
+# HA validates native_unit_of_measurement against the sensor's device class, so
+# a sensor reporting "degC" for a temperature device class loses its unit
+# conversion and its long-term statistics. obd2_standard_pids.h alone uses
+# "degC" for 13 PIDs (including 46-AmbientAirTemp), "volts" for 16 PIDs, and
+# "seconds"/"minutes"/"hours" for the duration PIDs.
+#
+# Keys are lower-cased; anything not listed here is passed through untouched.
+_UNIT_ALIASES: Final[dict[str, str]] = {
+    # Temperature
+    "degc": "°C",
+    "degf": "°F",
+    "degk": "K",
+    # Electrical
+    "volts": "V",
+    "volt": "V",
+    "millivolts": "mV",
+    "amps": "A",
+    "amp": "A",
+    "milliamps": "mA",
+    "watts": "W",
+    "watt": "W",
+    "kilowatts": "kW",
+    # Time
+    "seconds": "s",
+    "sec": "s",
+    "minutes": "min",
+    "mins": "min",
+    "hours": "h",
+    "hour": "h",
+    # Pressure (params.json spells kPa both "kPa" and "KPa")
+    "kpa": "kPa",
+    "hpa": "hPa",
+    # Flow rate
+    "grams/sec": "g/s",
+    # Speed
+    "kph": "km/h",
+    "km/hr": "km/h",
+    # Rotational speed (params.json spells it both "rpm" and "RPM")
+    "rpm": "rpm",
+}
+
+
+def normalize_unit(unit: str | None) -> str | None:
+    """Map a firmware unit string onto the spelling Home Assistant expects.
+
+    Args:
+        unit: Raw unit string from the device config or params.json.
+
+    Returns:
+        The canonical HA unit, or None when the string is a placeholder rather
+        than a real unit. Unrecognised units are returned stripped but
+        otherwise unchanged, so custom units still reach HA.
+    """
+    if unit is None:
+        return None
+
+    stripped = unit.strip()
+    lowered = stripped.lower()
+    if lowered in _NON_UNITS:
+        return None
+
+    return _UNIT_ALIASES.get(lowered, stripped)
+
+
 def _get_params_file_path() -> Path:
     """Get the path to the params.json file."""
     return Path(__file__).parent / "data" / "params.json"

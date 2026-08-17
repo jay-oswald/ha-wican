@@ -430,7 +430,7 @@ async def test_pid_sensor_real_world_data_format(
     assert rpm_entity is not None
     rpm_state = hass.states.get("sensor.wican_device_engine_rpm")
     assert rpm_state.state == "4300"
-    assert rpm_state.attributes.get("unit_of_measurement") == "RPM"
+    assert rpm_state.attributes.get("unit_of_measurement") == "rpm"
     # Note: "frequency" class should be normalized to None or valid HA device class
     
     # SPEED sensor
@@ -1016,3 +1016,189 @@ async def test_pid_sensor_invalid_device_class_unit_combo_filtered(
         # Device class "temperature" should be filtered because bananas is not valid
         assert test_state.attributes.get("device_class") is None
 
+
+
+async def test_standard_pid_sensors_are_measurements(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+) -> None:
+    """Standard PIDs restored from the config entry report as measurements.
+
+    42-ControlModuleVolt and 46-AmbientAirTemp are the two standard Mode 01
+    PIDs the WiCAN firmware exposes for 12V supply voltage and outside
+    temperature. The firmware spells the ambient unit "degC", which Home
+    Assistant does not accept for the temperature device class.
+    """
+    entry_data = mock_config_entry.data.copy()
+    entry_data["pid_keys"] = ["42-ControlModuleVolt", "46-AmbientAirTemp"]
+    entry_data["config"] = {
+        "42-ControlModuleVolt": {"unit": "V", "class": "voltage"},
+        "46-AmbientAirTemp": {"unit": "degC", "class": "temperature"},
+    }
+    mock_config_entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="WiCAN Device",
+        data=entry_data,
+        options=mock_config_entry.options,
+        unique_id=mock_config_entry.unique_id,
+    )
+    mock_config_entry.add_to_hass(hass)
+
+    with patch(
+        "custom_components.wican.async_get_clientsession",
+    ), patch(
+        "custom_components.wican.WiCANDataUpdateCoordinator.async_config_entry_first_refresh",
+    ):
+        assert await hass.config_entries.async_setup(mock_config_entry.entry_id)
+        await hass.async_block_till_done()
+
+    volt_state = hass.states.get("sensor.wican_device_42_controlmodulevolt")
+    assert volt_state is not None
+    assert volt_state.attributes.get("state_class") == "measurement"
+    assert volt_state.attributes.get("device_class") == "voltage"
+    assert volt_state.attributes.get("unit_of_measurement") == "V"
+
+    temp_state = hass.states.get("sensor.wican_device_46_ambientairtemp")
+    assert temp_state is not None
+    assert temp_state.attributes.get("state_class") == "measurement"
+    assert temp_state.attributes.get("device_class") == "temperature"
+    # "degC" is rewritten to the unit HA accepts for the temperature class
+    assert temp_state.attributes.get("unit_of_measurement") == "°C"
+
+
+async def test_pid_sensor_created_from_webhook_is_a_measurement(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+) -> None:
+    """A PID discovered from a webhook gets the same state class as a restored one.
+
+    Regression test: the discovery path used to omit state_class entirely, so
+    a PID looked like a text sensor until Home Assistant was restarted and the
+    restore path recreated it.
+    """
+    mock_config_entry.add_to_hass(hass)
+
+    assert await hass.config_entries.async_setup(mock_config_entry.entry_id)
+    await hass.async_block_till_done()
+
+    webhook_data = {
+        "autopid_data": {"42-ControlModuleVolt": 12.6, "46-AmbientAirTemp": 21},
+        "config": {
+            "42-ControlModuleVolt": {"unit": "V", "class": "voltage"},
+            "46-AmbientAirTemp": {"unit": "degC", "class": "temperature"},
+        },
+    }
+
+    coordinator = mock_config_entry.runtime_data.coordinator
+    coordinator.handle_webhook_data(webhook_data)
+    async_dispatcher_send(hass, "wican", "test_webhook_id", webhook_data)
+    await hass.async_block_till_done()
+    await coordinator.async_request_refresh()
+    await hass.async_block_till_done()
+
+    volt_state = hass.states.get("sensor.wican_device_42_controlmodulevolt")
+    assert volt_state is not None
+    assert volt_state.attributes.get("state_class") == "measurement"
+    assert volt_state.attributes.get("device_class") == "voltage"
+    assert volt_state.state == "12.6"
+
+    temp_state = hass.states.get("sensor.wican_device_46_ambientairtemp")
+    assert temp_state is not None
+    assert temp_state.attributes.get("state_class") == "measurement"
+    assert temp_state.attributes.get("unit_of_measurement") == "°C"
+
+
+async def test_text_pid_sensor_has_no_state_class(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+) -> None:
+    """PIDs with neither a unit nor a device class must not be measurements.
+
+    Vehicle profiles mark flags such as CHARGING and AC_PLUG as binary and send
+    them with unit "" and class "none"; HA raises if a measurement sensor
+    reports a non-numeric state.
+    """
+    entry_data = mock_config_entry.data.copy()
+    entry_data["pid_keys"] = ["AC_PLUG", "41-MonStatusDriveCycle"]
+    entry_data["config"] = {
+        "AC_PLUG": {"unit": "", "class": "none"},
+        # Bitfield PIDs report the placeholder unit "Encoded"
+        "41-MonStatusDriveCycle": {"unit": "Encoded", "class": "none"},
+    }
+    mock_config_entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="WiCAN Device",
+        data=entry_data,
+        options=mock_config_entry.options,
+        unique_id=mock_config_entry.unique_id,
+    )
+    mock_config_entry.add_to_hass(hass)
+
+    with patch(
+        "custom_components.wican.async_get_clientsession",
+    ), patch(
+        "custom_components.wican.WiCANDataUpdateCoordinator.async_config_entry_first_refresh",
+    ):
+        assert await hass.config_entries.async_setup(mock_config_entry.entry_id)
+        await hass.async_block_till_done()
+
+    for entity_id in (
+        "sensor.wican_device_ac_plug",
+        "sensor.wican_device_41_monstatusdrivecycle",
+    ):
+        state = hass.states.get(entity_id)
+        assert state is not None, entity_id
+        assert state.attributes.get("state_class") is None, entity_id
+        assert state.attributes.get("unit_of_measurement") is None, entity_id
+
+
+async def test_device_class_dropped_when_ha_rejects_the_unit(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+) -> None:
+    """Classes HA cannot pair with the reported unit are dropped, not passed on.
+
+    The firmware pairs gas with "ratio" and volume_storage with "%", and
+    declares a device class on PIDs that report no unit at all. Keeping the
+    class would cost the sensor its unit conversion and long-term statistics.
+    """
+    entry_data = mock_config_entry.data.copy()
+    entry_data["pid_keys"] = ["24-O2S1WRLambda", "2F-FuelLevel", "3C-CatTempB1S1"]
+    entry_data["config"] = {
+        "24-O2S1WRLambda": {"unit": "ratio", "class": "gas"},
+        "2F-FuelLevel": {"unit": "%", "class": "volume_storage"},
+        "3C-CatTempB1S1": {"unit": "none", "class": "temperature"},
+    }
+    mock_config_entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="WiCAN Device",
+        data=entry_data,
+        options=mock_config_entry.options,
+        unique_id=mock_config_entry.unique_id,
+    )
+    mock_config_entry.add_to_hass(hass)
+
+    with patch(
+        "custom_components.wican.async_get_clientsession",
+    ), patch(
+        "custom_components.wican.WiCANDataUpdateCoordinator.async_config_entry_first_refresh",
+    ):
+        assert await hass.config_entries.async_setup(mock_config_entry.entry_id)
+        await hass.async_block_till_done()
+
+    lambda_state = hass.states.get("sensor.wican_device_24_o2s1wrlambda")
+    assert lambda_state is not None
+    assert lambda_state.attributes.get("device_class") is None
+    assert lambda_state.attributes.get("unit_of_measurement") == "ratio"
+    assert lambda_state.attributes.get("state_class") == "measurement"
+
+    fuel_state = hass.states.get("sensor.wican_device_2f_fuellevel")
+    assert fuel_state is not None
+    assert fuel_state.attributes.get("device_class") is None
+    assert fuel_state.attributes.get("unit_of_measurement") == "%"
+
+    # Device class declared but no unit reported: HA accepts neither pairing
+    cat_state = hass.states.get("sensor.wican_device_3c_cattempb1s1")
+    assert cat_state is not None
+    assert cat_state.attributes.get("device_class") is None
+    assert cat_state.attributes.get("unit_of_measurement") is None
