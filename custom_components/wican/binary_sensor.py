@@ -62,7 +62,9 @@ class WiCANBinarySensorEntity(WiCANEntity, BinarySensorEntity, RestoreEntity):
         # If key not present, don't change state. Availability handled below.
         if key in status:
             self._attr_is_on = is_true_status(status[key])
-            self._attr_extra_state_attributes = get_sensor_attributes(key, self.coordinator.data)
+            self._attr_extra_state_attributes = get_sensor_attributes(
+                self.entity_description, self.coordinator.data,
+            )
 
         # Availability: if we have a status dict, entity is available; if device stopped pushing,
         # HA will keep last state, but we still emit state writes on updates to ensure logbook records.
