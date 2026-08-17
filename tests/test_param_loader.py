@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json
+from unittest.mock import AsyncMock, patch
+
 import pytest
 
 from custom_components.wican.param_loader import (
@@ -13,6 +16,8 @@ from custom_components.wican.param_loader import (
     get_all_params,
      is_valid_device_class,
     is_valid_class_unit_combo,
+    async_update_params_from_github,
+    _PARAMS,
     DEFAULT_PARAM_ICON,
 )
 
@@ -175,7 +180,7 @@ class TestEvParameters:
     def test_ev_charging_params(self) -> None:
         """Test EV charging parameters are loaded correctly."""
         assert get_param_unit("CHARGER_DC_PWR") == "kW"
-        assert get_param_unit("KWH_CHARGED") == "kwh"
+        assert get_param_unit("KWH_CHARGED") == "kWh"
         assert get_param_unit("AC_C_C") == "A"
         assert get_param_unit("AC_C_V") == "V"
 
@@ -467,3 +472,94 @@ class TestGitHubParamsUpdate:
         params = get_all_params()
         assert isinstance(params, dict)
         assert "SOC" in params  # Known param should still exist
+
+class TestAsyncUpdateParamsFromGithub:
+    """Tests for async_update_params_from_github merge behaviour."""
+
+    @pytest.fixture
+    def restore_params(self):
+        """Restore the module-level params after each test."""
+        original = dict(_PARAMS)
+        yield
+        _PARAMS.clear()
+        _PARAMS.update(original)
+
+    @pytest.mark.usefixtures("restore_params")
+    async def test_locally_added_params_are_kept(self, tmp_path) -> None:
+        """A parameter only present locally survives an upstream refresh."""
+        local_only = {"description": "Local", "settings": {"unit": "rpm", "class": "none"}}
+        _PARAMS.clear()
+        _PARAMS.update({"SOC": {"description": "Old", "settings": {"unit": "%"}}})
+        _PARAMS["MOTOR_RPM"] = local_only
+
+        upstream = {"SOC": {"description": "New", "settings": {"unit": "%"}}}
+        params_file = tmp_path / "params.json"
+
+        with patch(
+            "custom_components.wican.param_loader.async_fetch_params_from_github",
+            AsyncMock(return_value=(upstream, "newhash")),
+        ), patch(
+            "custom_components.wican.param_loader._async_get_current_params_hash",
+            AsyncMock(return_value="oldhash"),
+        ), patch(
+            "custom_components.wican.param_loader._get_params_file_path",
+            return_value=params_file,
+        ):
+            assert await async_update_params_from_github(AsyncMock()) is True
+
+        # Upstream wins on shared keys, local-only key is preserved
+        assert _PARAMS["SOC"]["description"] == "New"
+        assert _PARAMS["MOTOR_RPM"] == local_only
+
+        written = json.loads(params_file.read_text(encoding="utf-8"))
+        assert written["MOTOR_RPM"] == local_only
+
+    @pytest.mark.usefixtures("restore_params")
+    async def test_no_rewrite_when_content_matches(self, tmp_path) -> None:
+        """An unchanged merge result does not rewrite the file."""
+        upstream = {"SOC": {"description": "Same", "settings": {"unit": "%"}}}
+        _PARAMS.clear()
+        _PARAMS.update(upstream)
+        params_file = tmp_path / "params.json"
+
+        with patch(
+            "custom_components.wican.param_loader.async_fetch_params_from_github",
+            AsyncMock(return_value=(dict(upstream), "newhash")),
+        ), patch(
+            "custom_components.wican.param_loader._async_get_current_params_hash",
+            AsyncMock(return_value="oldhash"),
+        ), patch(
+            "custom_components.wican.param_loader._get_params_file_path",
+            return_value=params_file,
+        ):
+            assert await async_update_params_from_github(AsyncMock()) is False
+
+        assert not params_file.exists()
+
+
+class TestSyncedParams:
+    """Parameters that only exist in the full upstream params.json."""
+
+    def test_ev_profile_params_present(self) -> None:
+        """Parameters an EV profile reports resolve to a unit and class."""
+        assert get_param_unit("OUTSIDE_TEMPERATURE") == "°C"
+        assert get_param_device_class("OUTSIDE_TEMPERATURE") == "temperature"
+        assert get_param_unit("LV_SOC") == "%"
+        assert get_param_unit("HV_AH_CHARGED") == "Ah"
+        assert get_param_unit("KWH_DISCHARGED") == "kWh"
+
+    def test_cell_voltage_params_present(self) -> None:
+        """Per-cell voltages were missing entirely from the trimmed copy."""
+        assert get_param_unit("HV_C_V_001") == "V"
+        assert get_param_unit("HV_C_V_192") == "V"
+
+    def test_binary_sensor_types_present(self) -> None:
+        """Profile flags carry their binary_sensor type."""
+        assert is_binary_sensor("AC_PLUG") is True
+        assert is_binary_sensor("IGNITION") is True
+
+    def test_energy_params_use_energy_class(self) -> None:
+        """Upstream corrects classes the trimmed copy had as "battery"."""
+        assert get_param_device_class("KWH_CHARGED") == "energy"
+        assert get_param_device_class("AC_C_C") == "current"
+        assert get_param_device_class("HV_AV") == "power"
