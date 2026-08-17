@@ -8,7 +8,9 @@ from typing import TYPE_CHECKING
 from homeassistant.components.sensor import (
     RestoreSensor,
     SensorDeviceClass,
+    SensorStateClass,
 )
+from homeassistant.components.sensor.const import DEVICE_CLASS_UNITS
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 
@@ -21,6 +23,7 @@ from .param_loader import (
     get_param_unit,
     is_valid_class_unit_combo,
     is_valid_device_class,
+    normalize_unit,
 )
 
 if TYPE_CHECKING:
@@ -30,6 +33,65 @@ if TYPE_CHECKING:
 
 _LOGGER = logging.getLogger(__name__)
 PARALLEL_UPDATES = 0
+
+# Device classes whose state is a label or an instant in time rather than a
+# quantity, so they must never be given a MEASUREMENT state class.
+_NON_NUMERIC_DEVICE_CLASSES: frozenset[SensorDeviceClass] = frozenset(
+    {
+        SensorDeviceClass.DATE,
+        SensorDeviceClass.ENUM,
+        SensorDeviceClass.TIMESTAMP,
+    },
+)
+
+
+# How many decimals to show, per device class. The firmware sends whatever
+# the profile's expression produces: cJSON drops the fraction on integral
+# doubles, so HV_V arrives as 345 rather than 345.0, while a km->mi
+# conversion leaves ODOMETER reading 50339.1443967231. Without a suggested
+# precision Home Assistant renders both verbatim.
+#
+# This is display only - the native value is what HA converts and records -
+# and HA rescales it automatically when the unit is converted, so a value
+# stored in km still shows sensibly in miles.
+#
+# Voltage gets two decimals so per-cell differences stay visible: at one
+# decimal every HV_C_V_nnn reads 3.9 and the cell delta disappears.
+_DEFAULT_PRECISION: dict[SensorDeviceClass, int] = {
+    SensorDeviceClass.ATMOSPHERIC_PRESSURE: 0,
+    SensorDeviceClass.BATTERY: 1,
+    SensorDeviceClass.CURRENT: 1,
+    SensorDeviceClass.DISTANCE: 1,
+    SensorDeviceClass.DURATION: 0,
+    SensorDeviceClass.ENERGY: 2,
+    SensorDeviceClass.ENERGY_STORAGE: 2,
+    SensorDeviceClass.FREQUENCY: 0,
+    SensorDeviceClass.POWER: 2,
+    SensorDeviceClass.POWER_FACTOR: 1,
+    SensorDeviceClass.PRESSURE: 0,
+    SensorDeviceClass.SPEED: 0,
+    SensorDeviceClass.TEMPERATURE: 1,
+    SensorDeviceClass.VOLTAGE: 2,
+}
+
+
+def _get_pid_precision(device_class: SensorDeviceClass | None) -> int | None:
+    """Determine how many decimals a PID sensor should display.
+
+    Only PIDs with a device class get a precision. There is no sensible
+    blanket default: MOTOR_RPM, HV_AH_CHARGED and the cell-index PIDs carry
+    units Home Assistant has no device class for, and rendering rpm as
+    "0.00" would be worse than leaving it alone.
+
+    Args:
+        device_class: The resolved SensorDeviceClass, if any.
+
+    Returns:
+        A decimal count, or None to leave the value as the device reports it.
+    """
+    if device_class is None:
+        return None
+    return _DEFAULT_PRECISION.get(device_class)
 
 
 def _get_pid_unit(pid_key: str, config_unit: str | None = None) -> str | None:
@@ -41,6 +103,10 @@ def _get_pid_unit(pid_key: str, config_unit: str | None = None) -> str | None:
 
     This ensures consistent units even if device sometimes sends None.
 
+    Both sources are run through normalize_unit(), which drops placeholders
+    ("none", "Encoded") and rewrites firmware spellings HA does not accept
+    ("degC" -> "°C", "volts" -> "V").
+
     Args:
         pid_key: The PID sensor key/name from the device.
         config_unit: Unit from device config (may be None/empty/"none").
@@ -48,16 +114,13 @@ def _get_pid_unit(pid_key: str, config_unit: str | None = None) -> str | None:
     Returns:
         Unit string (e.g., "km/h", "°C") or None if no match.
     """
-    # Normalize "none", empty string, None to actual None
-    if config_unit in ("none", "", None):
-        config_unit = None
-
     # If device provided a valid unit, use it
-    if config_unit is not None:
-        return config_unit
+    unit = normalize_unit(config_unit)
+    if unit is not None:
+        return unit
 
     # Fallback to params.json lookup
-    return get_param_unit(pid_key)
+    return normalize_unit(get_param_unit(pid_key))
 
 
 def _get_pid_icon(
@@ -134,13 +197,61 @@ def _normalize_device_class(
             )
             return None
 
+    # Home Assistant's own table is authoritative and covers every device
+    # class, including the ones _DEVICE_CLASS_VALID_UNITS has no rules for.
+    # The firmware pairs classes with units HA rejects (e.g. gas + "ratio",
+    # volume_storage + "%", or a temperature class with no unit at all);
+    # keeping the class would cost the sensor its unit conversion and its
+    # long-term statistics, so drop the class and keep the raw measurement.
+    if device_class is not None:
+        valid_units = DEVICE_CLASS_UNITS.get(device_class)
+        if valid_units is not None and unit not in valid_units:
+            _LOGGER.debug(
+                "Unit %s is not valid for device_class %s on %s, dropping device_class",
+                unit, device_class, pid_key or "sensor",
+            )
+            return None
+
     return device_class
+
+
+def _get_pid_state_class(
+    unit: str | None,
+    device_class: SensorDeviceClass | None,
+) -> SensorStateClass | None:
+    """Determine the state class for a PID sensor.
+
+    Numeric PIDs need SensorStateClass.MEASUREMENT to be graphed and recorded
+    as long-term statistics. Without it HA treats them as plain text sensors,
+    which is what standard PIDs such as 42-ControlModuleVolt and
+    46-AmbientAirTemp used to look like.
+
+    Non-numeric PIDs (gear, drive mode, the "on"/"off" flags a profile marks as
+    binary) must NOT get a state class: HA raises on a measurement sensor whose
+    state is not numeric.
+
+    Args:
+        unit: The resolved unit of measurement, if any.
+        device_class: The resolved SensorDeviceClass, if any.
+
+    Returns:
+        SensorStateClass.MEASUREMENT for numeric PIDs, otherwise None.
+    """
+    if device_class in _NON_NUMERIC_DEVICE_CLASSES:
+        return None
+
+    # A PID that reports neither a unit nor a device class carries a label,
+    # not a measurement.
+    if device_class is None and unit is None:
+        return None
+
+    return SensorStateClass.MEASUREMENT
 
 
 DYNAMIC_PID_SENSORS = {}
 
 
-async def async_setup_entry(  # noqa: C901
+async def async_setup_entry(  # noqa: C901, PLR0915
     hass: HomeAssistant,
     config_entry: WiCANConfigEntry,
     async_add_entities: AddEntitiesCallback,
@@ -163,11 +274,13 @@ async def async_setup_entry(  # noqa: C901
         # Use _get_pid_unit with config unit for consistent fallback handling
         unit = _get_pid_unit(pid_key, config.get("unit"))
         device_class = _normalize_device_class(config.get("class"), unit, pid_key)
+        state_class = _get_pid_state_class(unit, device_class)
         icon = _get_pid_icon(pid_key, device_class)
+        precision = _get_pid_precision(device_class)
 
         _LOGGER.debug(
-            "Restoring PID sensor %s with unit=%s, device_class=%s, icon=%s",
-            pid_key, unit, device_class, icon,
+            "Restoring PID sensor %s with unit=%s, device_class=%s, state_class=%s, icon=%s",
+            pid_key, unit, device_class, state_class, icon,
         )
 
         entity_description = WiCANSensorEntityDescription(
@@ -175,7 +288,8 @@ async def async_setup_entry(  # noqa: C901
             name=pid_key,
             device_class=device_class,
             native_unit_of_measurement=unit,
-            state_class="measurement",
+            state_class=state_class,
+            suggested_display_precision=precision,
             icon=icon,
         )
         entity = WiCANPidSensorEntity(config_entry, pid_key, entity_description)
@@ -199,11 +313,13 @@ async def async_setup_entry(  # noqa: C901
                 # Use _get_pid_unit with config unit for consistent fallback handling
                 unit = _get_pid_unit(pid_key, config.get("unit"))
                 device_class = _normalize_device_class(config.get("class"), unit, pid_key)
+                state_class = _get_pid_state_class(unit, device_class)
                 icon = _get_pid_icon(pid_key, device_class)
+                precision = _get_pid_precision(device_class)
 
                 _LOGGER.debug(
-                    "Creating new PID sensor %s with unit=%s, device_class=%s, icon=%s",
-                    pid_key, unit, device_class, icon,
+                    "Creating new PID sensor %s with unit=%s, device_class=%s, state_class=%s, icon=%s",
+                    pid_key, unit, device_class, state_class, icon,
                 )
 
                 entity_description = WiCANSensorEntityDescription(
@@ -211,6 +327,8 @@ async def async_setup_entry(  # noqa: C901
                     name=pid_key,
                     device_class=device_class,
                     native_unit_of_measurement=unit,
+                    state_class=state_class,
+                    suggested_display_precision=precision,
                     icon=icon,
                 )
                 entity = WiCANPidSensorEntity(config_entry, pid_key, entity_description)
