@@ -26,7 +26,15 @@ if TYPE_CHECKING:
     from ipaddress import IPv4Address, IPv6Address
 
     from homeassistant.data_entry_flow import FlowResult
-    from homeassistant.helpers.service_info.zeroconf import ZeroconfServiceInfo
+
+    # ZeroconfServiceInfo moved between HA releases: it lived in
+    # helpers.service_info.zeroconf from 2025.2 until the deprecated aliases
+    # were cleaned up in 2026, before that and after that it is in
+    # components.zeroconf. Try both so type checkers work on any HA version.
+    try:
+        from homeassistant.components.zeroconf import ZeroconfServiceInfo
+    except ImportError:
+        from homeassistant.helpers.service_info.zeroconf import ZeroconfServiceInfo
 
 _LOGGER = logging.getLogger(__name__)
 
