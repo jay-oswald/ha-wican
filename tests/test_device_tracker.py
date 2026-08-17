@@ -6,7 +6,12 @@ import pytest
 from unittest.mock import patch
 
 from homeassistant.components.device_tracker import SourceType
-from homeassistant.const import STATE_HOME, STATE_NOT_HOME, STATE_UNAVAILABLE
+from homeassistant.const import (
+    STATE_HOME,
+    STATE_NOT_HOME,
+    STATE_UNAVAILABLE,
+    STATE_UNKNOWN,
+)
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
 
@@ -48,8 +53,8 @@ async def test_device_tracker_setup(
     state = hass.states.get(entity_id)
     assert state is not None
     
-    # Initially should be unavailable (no GPS data yet)
-    assert state.state == STATE_UNAVAILABLE
+    # No fix yet, so no location - but the device itself is reachable
+    assert state.state == STATE_UNKNOWN
 
 
 async def test_device_tracker_gps_update(
@@ -109,10 +114,10 @@ async def test_device_tracker_invalid_coordinates(
     coordinator.handle_webhook_data(invalid_gps_data)
     await hass.async_block_till_done()
 
-    # Entity should remain unavailable
+    # Coordinates rejected, so the entity keeps reporting no location
     entity_id = "device_tracker.wican_device_location"
     state = hass.states.get(entity_id)
-    assert state.state == STATE_UNAVAILABLE
+    assert state.state == STATE_UNKNOWN
 
 
 async def test_device_tracker_missing_gps_data(
@@ -136,10 +141,10 @@ async def test_device_tracker_missing_gps_data(
     coordinator.handle_webhook_data(no_gps_data)
     await hass.async_block_till_done()
 
-    # Entity should remain unavailable
+    # The device is reporting, it just has no GPS block
     entity_id = "device_tracker.wican_device_location"
     state = hass.states.get(entity_id)
-    assert state.state == STATE_UNAVAILABLE
+    assert state.state == STATE_UNKNOWN
 
 
 async def test_device_tracker_partial_gps_data(
@@ -356,7 +361,7 @@ async def test_device_tracker_gps_invalid_coordinate_logging(
     # Verify entity didn't update with invalid data
     entity_id = "device_tracker.wican_device_location"
     state = hass.states.get(entity_id)
-    assert state.state == STATE_UNAVAILABLE
+    assert state.state == STATE_UNKNOWN
 
 
 async def test_device_tracker_gps_parse_error_logging(
@@ -383,7 +388,54 @@ async def test_device_tracker_gps_parse_error_logging(
     )
     await hass.async_block_till_done()
     
-    # Verify entity remains unavailable
+    # Verify entity reports no location
     entity_id = "device_tracker.wican_device_location"
     state = hass.states.get(entity_id)
+    assert state.state == STATE_UNKNOWN
+
+
+async def test_device_tracker_available_without_gps(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+) -> None:
+    """The tracker stays available on hardware that reports no GPS.
+
+    Availability used to require latitude and longitude, so on a WiCAN
+    without GPS the entity was unavailable forever, and a vehicle parked
+    somewhere without a fix looked like a device that had gone offline.
+    """
+    mock_config_entry.add_to_hass(hass)
+    await hass.config_entries.async_setup(mock_config_entry.entry_id)
+    await hass.async_block_till_done()
+
+    coordinator = mock_config_entry.runtime_data.coordinator
+    coordinator.handle_webhook_data({"status": {"device_id": "test_device_123"}})
+    await hass.async_block_till_done()
+
+    state = hass.states.get("device_tracker.wican_device_location")
+    assert state is not None
+    assert state.state == STATE_UNKNOWN
+    assert "latitude" not in state.attributes
+
+
+async def test_device_tracker_unavailable_when_coordinator_fails(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_gps_data: dict,
+) -> None:
+    """Losing contact with the device does mark the tracker unavailable."""
+    mock_config_entry.add_to_hass(hass)
+    await hass.config_entries.async_setup(mock_config_entry.entry_id)
+    await hass.async_block_till_done()
+
+    coordinator = mock_config_entry.runtime_data.coordinator
+    coordinator.handle_webhook_data(mock_gps_data)
+    await hass.async_block_till_done()
+
+    assert hass.states.get("device_tracker.wican_device_location").state == STATE_NOT_HOME
+
+    coordinator.async_set_update_error(RuntimeError("device unreachable"))
+    await hass.async_block_till_done()
+
+    state = hass.states.get("device_tracker.wican_device_location")
     assert state.state == STATE_UNAVAILABLE

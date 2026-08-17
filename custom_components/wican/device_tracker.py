@@ -149,13 +149,14 @@ class WiCANDeviceTrackerEntity(CoordinatorEntity, TrackerEntity, RestoreEntity):
     def available(self) -> bool:
         """Return if entity is available.
 
-        Entity is available if we have valid GPS coordinates.
+        Availability reflects whether the device is reporting at all, not
+        whether it has a GPS fix. Requiring coordinates left the tracker
+        permanently unavailable on the WiCAN models that have no GPS
+        hardware, and made a vehicle parked underground look like a device
+        that had dropped off the network. Without coordinates the entity
+        simply has no location, which Home Assistant renders as unknown.
         """
-        return (
-            self.coordinator.last_update_success
-            and self._attr_latitude is not None
-            and self._attr_longitude is not None
-        )
+        return self.coordinator.last_update_success
 
     @callback
     def _handle_coordinator_update(self) -> None:
@@ -163,8 +164,10 @@ class WiCANDeviceTrackerEntity(CoordinatorEntity, TrackerEntity, RestoreEntity):
         gps_data = self.coordinator.data.get("gps", {})
 
         if not gps_data:
-            # No GPS data available
+            # No GPS data in this update. Still write the state so a change in
+            # availability reaches Home Assistant.
             _LOGGER.debug("No GPS data in coordinator update")
+            self.async_write_ha_state()
             return
 
         # Update GPS coordinates
