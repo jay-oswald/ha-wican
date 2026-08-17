@@ -77,6 +77,8 @@ DEVICE_CLASS_ICONS: Final[dict[str, str]] = {
 PARAM_NAME_ICONS: Final[dict[str, str]] = {
     # Engine
     "engine_rpm": "mdi:engine",
+    "engine_load": "mdi:engine",
+    "timing_adv": "mdi:timer-cog-outline",
     # Fuel
     "fuel": "mdi:fuel",
     "fuel_rate": "mdi:gas-station",
@@ -100,6 +102,7 @@ PARAM_NAME_ICONS: Final[dict[str, str]] = {
     "oilch_dis": "mdi:oil",
     # Battery/Voltage (12V)
     "lv_v": "mdi:car-battery",
+    "ctrl_mod_v": "mdi:car-battery",
     "alt_duty": "mdi:current-ac",
     # EV Battery/SOC
     "soc": "mdi:battery",
@@ -433,6 +436,65 @@ _PID_ALIASES: Final[dict[str, str]] = {
 }
 
 
+# params.json describes vehicle-profile parameters (SOC, HV_V, RANGE, ...), not
+# standard OBD-II Mode 01 PIDs, so six of the names _PID_ALIASES maps to have
+# never existed in it - the lookup silently returned nothing for the PIDs most
+# vehicles actually support. These fill that gap.
+#
+# Units match what obd2_standard_pids.h reports for the same PID, so a sensor
+# built from this fallback and one built from the device's own config agree and
+# HA does not see the unit change underneath it.
+_STANDARD_PID_FALLBACKS: Final[dict[str, ParamDefinition]] = {
+    # PID 0x46
+    "AMBIENT_TMP": {
+        "description": "Ambient Air Temperature",
+        "settings": {"unit": "°C", "class": "temperature"},
+    },
+    # PID 0x33
+    "BARO_PRES": {
+        "description": "Absolute Barometric Pressure",
+        "settings": {"unit": "kPa", "class": "pressure"},
+    },
+    # PID 0x42
+    "CTRL_MOD_V": {
+        "description": "Control Module Voltage",
+        "settings": {"unit": "V", "class": "voltage"},
+    },
+    # PID 0x21
+    "DIST_MIL": {
+        "description": "Distance Travelled With MIL On",
+        "settings": {"unit": "km", "class": "distance"},
+    },
+    # PID 0x04
+    "ENGINE_LOAD": {
+        "description": "Calculated Engine Load",
+        "settings": {"unit": "%", "class": "none"},
+    },
+    # PID 0x0E
+    "TIMING_ADV": {
+        "description": "Timing Advance",
+        "settings": {"unit": "deg", "class": "none"},
+    },
+}
+
+
+def _lookup_param(param_name: str) -> ParamDefinition | None:
+    """Resolve a parameter definition by name.
+
+    params.json wins; the built-in standard-PID table fills the gaps it has.
+
+    Args:
+        param_name: Parameter name (case-insensitive, supports various formats).
+
+    Returns:
+        The parameter definition, or None if the name is unknown.
+    """
+    key = _normalize_param_name(param_name)
+    if key in _PARAMS:
+        return _PARAMS[key]
+    return _STANDARD_PID_FALLBACKS.get(key)
+
+
 # Valid Home Assistant sensor device classes
 # Invalid classes from firmware will be filtered out
 _VALID_HA_DEVICE_CLASSES: Final[set[str]] = {
@@ -609,16 +671,54 @@ def get_param_unit(param_name: str) -> str | None:
     Returns:
         Unit string or None if not found/empty.
     """
-    # Normalize to canonical params.json name
-    key = _normalize_param_name(param_name)
+    param = _lookup_param(param_name)
 
-    if key in _PARAMS:
-        unit = _PARAMS[key].get("settings", {}).get("unit", "")
+    if param is not None:
+        unit = param.get("settings", {}).get("unit", "")
         # Return None for empty/none units
         if unit and unit.lower() not in ("", "none"):
             return unit
 
     return None
+
+
+# params.json uses "battery" loosely, to mean "something about the battery",
+# and pairs it with whatever unit the value actually has. Home Assistant's
+# battery device class accepts only "%", so every one of those parameters -
+# 198 of them, including every HV_C_V_nnn cell voltage, LV_V, AC_C_V and
+# CAPACITOR - lost its device class, its unit conversion and its icon.
+#
+# The unit says what the value really is, so use it. Upstream has already
+# corrected a few entries this way (AC_C_C -> current, HV_AV -> power,
+# KWH_CHARGED -> energy); this applies the same reading to the rest.
+_UNIT_TO_DEVICE_CLASS: Final[dict[str, str]] = {
+    "v": "voltage",
+    "mv": "voltage",
+    "kv": "voltage",
+    "a": "current",
+    "ma": "current",
+    "w": "power",
+    "kw": "power",
+    "mw": "power",
+    "wh": "energy_storage",
+    "kwh": "energy_storage",
+    "mwh": "energy_storage",
+}
+
+
+def _infer_device_class_from_unit(unit: str | None) -> str | None:
+    """Infer a device class from a unit, for params.json's overloaded "battery".
+
+    Args:
+        unit: The parameter's unit of measurement.
+
+    Returns:
+        A device class string, or None when the unit does not imply one
+        (e.g. "Ah" - Home Assistant has no electric-charge device class).
+    """
+    if not unit:
+        return None
+    return _UNIT_TO_DEVICE_CLASS.get(unit.strip().lower())
 
 
 def get_param_device_class(param_name: str) -> str | None:
@@ -630,12 +730,19 @@ def get_param_device_class(param_name: str) -> str | None:
     Returns:
         Device class string or None if not found/invalid.
     """
-    key = _normalize_param_name(param_name)
+    param = _lookup_param(param_name)
 
-    if key in _PARAMS:
-        device_class = _PARAMS[key].get("settings", {}).get("class", "")
+    if param is not None:
+        settings = param.get("settings", {})
+        device_class = settings.get("class", "")
         # Return None for empty/none classes
         if device_class and device_class.lower() not in ("", "none"):
+            if device_class.lower() == "battery":
+                unit = settings.get("unit", "")
+                # "%" is the only unit HA accepts for the battery class, so
+                # anything else means params.json meant "battery-related".
+                if unit and unit.strip() != "%":
+                    return _infer_device_class_from_unit(unit)
             return device_class
 
     return None
@@ -685,10 +792,10 @@ def get_param_description(param_name: str) -> str | None:
     Returns:
         Description string or None if not found.
     """
-    key = _normalize_param_name(param_name)
+    param = _lookup_param(param_name)
 
-    if key in _PARAMS:
-        return _PARAMS[key].get("description")
+    if param is not None:
+        return param.get("description")
 
     return None
 
@@ -702,10 +809,10 @@ def is_binary_sensor(param_name: str) -> bool:
     Returns:
         True if parameter is defined as binary_sensor type.
     """
-    key = _normalize_param_name(param_name)
+    param = _lookup_param(param_name)
 
-    if key in _PARAMS:
-        return _PARAMS[key].get("settings", {}).get("type") == "binary_sensor"
+    if param is not None:
+        return param.get("settings", {}).get("type") == "binary_sensor"
 
     return False
 

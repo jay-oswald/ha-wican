@@ -8,6 +8,7 @@ from custom_components.wican.param_loader import (
     get_param_unit,
     get_param_device_class,
     get_param_icon,
+    _infer_device_class_from_unit,
     get_param_description,
     is_binary_sensor,
     get_all_params,
@@ -467,3 +468,113 @@ class TestGitHubParamsUpdate:
         params = get_all_params()
         assert isinstance(params, dict)
         assert "SOC" in params  # Known param should still exist
+
+class TestStandardPidFallbacks:
+    """Standard Mode 01 PIDs that params.json has never described."""
+
+    def test_control_module_voltage(self) -> None:
+        """PID 0x42 resolves through every alias spelling."""
+        for name in (
+            "42-ControlModuleVolt",
+            "42_ControlModuleVolt",
+            "ControlModuleVolt",
+            "CTRL_MOD_V",
+        ):
+            assert get_param_unit(name) == "V", name
+            assert get_param_device_class(name) == "voltage", name
+
+    def test_ambient_air_temperature(self) -> None:
+        """PID 0x46 resolves to the unit HA accepts for temperature."""
+        for name in ("46-AmbientAirTemp", "AmbientAirTemp", "AMBIENT_TMP"):
+            assert get_param_unit(name) == "°C", name
+            assert get_param_device_class(name) == "temperature", name
+
+    def test_remaining_gap_pids(self) -> None:
+        """The other four alias targets that pointed at nothing."""
+        assert get_param_unit("33-AbsBaroPres") == "kPa"
+        assert get_param_device_class("33-AbsBaroPres") == "pressure"
+
+        assert get_param_unit("21-DistanceMILOn") == "km"
+        assert get_param_device_class("21-DistanceMILOn") == "distance"
+
+        assert get_param_unit("04-CalcEngineLoad") == "%"
+        assert get_param_device_class("04-CalcEngineLoad") is None
+
+        assert get_param_unit("0E-TimingAdvance") == "deg"
+        assert get_param_device_class("0E-TimingAdvance") is None
+
+    def test_descriptions_available(self) -> None:
+        """Fallbacks carry a description like params.json entries do."""
+        assert get_param_description("42-ControlModuleVolt") == "Control Module Voltage"
+        assert get_param_description("46-AmbientAirTemp") == "Ambient Air Temperature"
+
+    def test_fallbacks_are_not_binary_sensors(self) -> None:
+        """None of the fallbacks declare a binary_sensor type."""
+        for name in ("42-ControlModuleVolt", "46-AmbientAirTemp", "04-CalcEngineLoad"):
+            assert is_binary_sensor(name) is False, name
+
+    def test_icons_resolve(self) -> None:
+        """PIDs without a device class still get a meaningful icon."""
+        assert get_param_icon("04-CalcEngineLoad", None) == "mdi:engine"
+        assert get_param_icon("0E-TimingAdvance", None) == "mdi:timer-cog-outline"
+
+    def test_params_json_still_wins(self) -> None:
+        """A name present in params.json is not shadowed by the fallbacks."""
+        assert get_param_unit("SOC") == "%"
+        assert get_param_unit("05-EngineCoolantTemp") == "°C"
+
+    def test_unknown_name_still_returns_none(self) -> None:
+        """Names in neither source keep returning None."""
+        assert get_param_unit("totally_unknown") is None
+        assert get_param_device_class("totally_unknown") is None
+        assert get_param_description("totally_unknown") is None
+
+
+class TestDeviceClassInferredFromUnit:
+    """params.json overloads "battery"; the unit says what the value really is."""
+
+    def test_infer_from_unit_directly(self) -> None:
+        """The unit table covers the electrical units params.json uses."""
+        assert _infer_device_class_from_unit("V") == "voltage"
+        assert _infer_device_class_from_unit("mV") == "voltage"
+        assert _infer_device_class_from_unit("A") == "current"
+        assert _infer_device_class_from_unit("mA") == "current"
+        assert _infer_device_class_from_unit("kW") == "power"
+        assert _infer_device_class_from_unit("kWh") == "energy_storage"
+
+    def test_infer_is_case_insensitive_and_trims(self) -> None:
+        """Units are compared case-insensitively."""
+        assert _infer_device_class_from_unit(" v ") == "voltage"
+        assert _infer_device_class_from_unit("KWH") == "energy_storage"
+
+    def test_units_with_no_ha_device_class(self) -> None:
+        """Ah has no Home Assistant device class, so no class is invented."""
+        assert _infer_device_class_from_unit("Ah") is None
+        assert _infer_device_class_from_unit("") is None
+        assert _infer_device_class_from_unit(None) is None
+
+    def test_battery_with_voltage_unit(self) -> None:
+        """A "battery" param measured in volts is a voltage sensor.
+
+        HA accepts only "%" for the battery device class, so these used to
+        lose their class entirely.
+        """
+        assert get_param_device_class("LV_V") == "voltage"
+        assert get_param_device_class("AC_C_V") == "voltage"
+
+    def test_battery_with_percent_unit_is_untouched(self) -> None:
+        """A real state-of-charge percentage keeps the battery class."""
+        assert get_param_device_class("SOC") == "battery"
+        assert get_param_device_class("SOC_MIN") == "battery"
+
+    def test_battery_with_unmappable_unit(self) -> None:
+        """Ah is battery-related but has no device class; better none than wrong."""
+        assert get_param_device_class("HV_CAPACITY") is None
+        assert get_param_device_class("BATT_CAPACITY") is None
+
+    def test_non_battery_classes_are_untouched(self) -> None:
+        """Only the overloaded "battery" class is reinterpreted."""
+        assert get_param_device_class("HV_V") == "voltage"
+        assert get_param_device_class("COOLANT_TMP") == "temperature"
+        assert get_param_device_class("SPEED") == "speed"
+        assert get_param_device_class("THROTTLE") is None
