@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 from homeassistant.components.binary_sensor import (
     BinarySensorEntity,
 )
+from homeassistant.const import STATE_OFF, STATE_ON
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.restore_state import RestoreEntity
 
@@ -76,8 +77,15 @@ class WiCANBinarySensorEntity(WiCANEntity, BinarySensorEntity, RestoreEntity):
 
     async def async_added_to_hass(self) -> None:
         """Restore entity state."""
-        # Restore last known state so logbook has a baseline before first push
+        # Restore last known state so logbook has a baseline before first push.
+        # Only on/off are a known state: comparing against "on" would turn a
+        # restored "unavailable" or "unknown" into a fabricated "off", which
+        # reads as a real measurement the device never reported.
         last_state = await self.async_get_last_state()
-        if last_state is not None and self._attr_is_on is None:
-            self._attr_is_on = last_state.state == "on"
+        if (
+            last_state is not None
+            and self._attr_is_on is None
+            and last_state.state in (STATE_ON, STATE_OFF)
+        ):
+            self._attr_is_on = last_state.state == STATE_ON
         await super().async_added_to_hass()
