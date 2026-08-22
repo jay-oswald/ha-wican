@@ -8,10 +8,13 @@ from typing import TYPE_CHECKING, Any
 
 from homeassistant.exceptions import ConfigEntryError
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
+from homeassistant.util import dt as dt_util
 
 from .const import DOMAIN, WICAN_DATA_UPDATE_INTERVAL
 
 if TYPE_CHECKING:
+    from datetime import datetime
+
     from homeassistant.core import HomeAssistant
 
     from . import WiCANConfigEntry
@@ -34,6 +37,12 @@ class WiCANDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Initialize the coordinator."""
         self.config_entry = config_entry
         self._data: dict[str, Any] = {}
+        # When the device last actually pushed data, as opposed to
+        # last_update_success which this push-based coordinator sets True
+        # once and never re-evaluates. Entities use this to tell a fresh
+        # reading from one the device hasn't refreshed since - e.g. one
+        # that only reports while parked at home on Wi-Fi.
+        self.last_webhook_time: datetime | None = None
 
         super().__init__(
             hass,
@@ -78,6 +87,7 @@ class WiCANDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         # Update internal data store
         self._data.update(data)
+        self.last_webhook_time = dt_util.utcnow()
 
         # Notify all entities that data has been updated
         self.async_set_updated_data(self._data)

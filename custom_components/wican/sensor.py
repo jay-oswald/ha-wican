@@ -259,6 +259,15 @@ class WiCANSensorEntity(WiCANEntity, RestoreSensor):
     def _handle_coordinator_update(self) -> None:
         """Handle updated data from the coordinator."""
         key = self.entity_description.key
+
+        if key == "last_update":
+            # Not part of any webhook payload - it's the coordinator's own
+            # record of when it last received one.
+            if self.coordinator.last_webhook_time is not None:
+                self._attr_native_value = self.coordinator.last_webhook_time
+                self.async_write_ha_state()
+            return
+
         status = self.coordinator.data.get("status", {})
 
         if key not in status:
