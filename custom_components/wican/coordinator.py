@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import timedelta
 import logging
+import re
 from typing import TYPE_CHECKING, Any
 
 from homeassistant.exceptions import ConfigEntryError
@@ -21,6 +22,30 @@ _LOGGER = logging.getLogger(__name__)
 # WiCAN is push-based via webhooks, so we don't need frequent polling
 # This is just for fallback/health check
 UPDATE_INTERVAL = timedelta(seconds=WICAN_DATA_UPDATE_INTERVAL)
+
+# Matches the firmware's dev_status_format_uptime() output: "HH:MM:SS" or,
+# once uptime passes 24h, "Nd HH:MM:SS".
+_UPTIME_RE = re.compile(r"^(?:(\d+)d\s+)?(\d+):(\d{2}):(\d{2})$")
+
+
+def _parse_uptime_seconds(value: str) -> int | None:
+    """Convert the firmware's formatted uptime string to whole seconds.
+
+    The device reports "N/A" when it has no reading yet, and otherwise
+    "HH:MM:SS" or "Dd HH:MM:SS" - never a raw number - so the sensor needs a
+    numeric value before it can carry a duration device/state class.
+
+    Args:
+        value: The raw "uptime" string from the webhook or status payload.
+
+    Returns:
+        Total whole seconds, or None if the value isn't a recognized uptime.
+    """
+    match = _UPTIME_RE.match(value.strip())
+    if not match:
+        return None
+    days, hours, minutes, seconds = (int(part or 0) for part in match.groups())
+    return ((days * 24 + hours) * 60 + minutes) * 60 + seconds
 
 
 class WiCANDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
@@ -146,6 +171,12 @@ class WiCANDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """
         if raw_value is None:
             return None
+
+        # Uptime: the device reports "HH:MM:SS" / "Nd HH:MM:SS" / "N/A", never
+        # a number. A duration sensor needs seconds, so convert here rather
+        # than leaving a formatted string HA can only display as text.
+        if key == "uptime" and isinstance(raw_value, str):
+            return _parse_uptime_seconds(raw_value)
 
         # Battery voltage: strip "V" / " V" suffix (any case) and convert to float
         # Handles firmware variants: "12.5V", "12.5 V", "12.5v", " 12.5 V "

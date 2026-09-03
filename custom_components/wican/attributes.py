@@ -1,7 +1,12 @@
 from dataclasses import dataclass, field
 
 from homeassistant.components.binary_sensor import BinarySensorEntityDescription
-from homeassistant.components.sensor import SensorDeviceClass, SensorEntityDescription
+from homeassistant.components.sensor import (
+    SensorDeviceClass,
+    SensorEntityDescription,
+    SensorStateClass,
+)
+from homeassistant.const import UnitOfTime
 from homeassistant.helpers.entity import EntityCategory
 
 
@@ -56,6 +61,10 @@ SENSOR_DESCRIPTIONS: tuple[WiCANSensorEntityDescription, ...] = (
         translation_key="uptime",
         entity_category=EntityCategory.DIAGNOSTIC,
         icon="mdi:clock-outline",
+        device_class=SensorDeviceClass.DURATION,
+        native_unit_of_measurement=UnitOfTime.SECONDS,
+        state_class=SensorStateClass.MEASUREMENT,
+        suggested_display_precision=0,
     ),
 )
 

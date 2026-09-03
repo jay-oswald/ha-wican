@@ -72,7 +72,35 @@ async def test_sensor_states_update_from_webhook(
 
     uptime_state = hass.states.get("sensor.wican_device_uptime")
     assert uptime_state is not None
-    assert uptime_state.state == "01:00:00"
+    # "01:00:00" from the device normalizes to whole seconds so the sensor
+    # can carry a duration device/state class.
+    assert uptime_state.state == "3600"
+    assert uptime_state.attributes.get("device_class") == "duration"
+    assert uptime_state.attributes.get("state_class") == "measurement"
+    assert uptime_state.attributes.get("unit_of_measurement") == "s"
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("01:00:00", 3600),
+        ("00:00:00", 0),
+        ("3d 04:05:06", 273906),
+        ("N/A", None),
+        ("garbage", None),
+    ],
+)
+async def test_uptime_normalization(
+    hass: HomeAssistant,
+    init_integration: MockConfigEntry,
+    raw: str,
+    expected: int | None,
+) -> None:
+    """Uptime strings from the firmware convert to whole seconds."""
+    entry = init_integration
+    coordinator = entry.runtime_data.coordinator
+
+    assert coordinator.normalize_sensor_value("uptime", raw) == expected
 
 
 async def test_pid_sensor_entities_created(
