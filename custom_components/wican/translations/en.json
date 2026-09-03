@@ -41,6 +41,9 @@
         },
         "uptime": {
           "name": "Uptime"
+        },
+        "last_update": {
+          "name": "Last Update"
         }
       },
       "binary_sensor": {

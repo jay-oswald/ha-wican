@@ -39,6 +39,10 @@ async def test_sensor_entities_created(
     assert uptime is not None
     assert uptime.unique_id.endswith("_uptime")
 
+    last_update = entity_registry.async_get("sensor.wican_device_last_update")
+    assert last_update is not None
+    assert last_update.unique_id.endswith("_last_update")
+
 
 async def test_sensor_states_update_from_webhook(
     hass: HomeAssistant,
@@ -73,6 +77,55 @@ async def test_sensor_states_update_from_webhook(
     uptime_state = hass.states.get("sensor.wican_device_uptime")
     assert uptime_state is not None
     assert uptime_state.state == "01:00:00"
+
+    last_update_state = hass.states.get("sensor.wican_device_last_update")
+    assert last_update_state is not None
+    assert last_update_state.state != "unknown"
+    assert last_update_state.attributes.get("device_class") == "timestamp"
+
+
+async def test_last_update_sensor_unknown_before_first_webhook(
+    hass: HomeAssistant,
+    init_integration: MockConfigEntry,
+) -> None:
+    """The last-update sensor has no value until a webhook ever arrives."""
+    state = hass.states.get("sensor.wican_device_last_update")
+    assert state is not None
+    assert state.state == "unknown"
+
+
+async def test_last_update_sensor_restoration(
+    hass: HomeAssistant,
+    init_integration: MockConfigEntry,
+    mock_webhook_data: dict,
+    hass_client,
+) -> None:
+    """The last-update timestamp survives a restart."""
+    entry = init_integration
+    client = await hass_client()
+
+    await client.post(
+        f"/api/webhook/{entry.data[CONF_WEBHOOK_ID]}", json=mock_webhook_data,
+    )
+    await hass.async_block_till_done()
+
+    first_state = hass.states.get("sensor.wican_device_last_update")
+    assert first_state is not None
+    assert first_state.state != "unknown"
+
+    await hass.config_entries.async_unload(entry.entry_id)
+    await hass.async_block_till_done()
+
+    with patch(
+        "custom_components.wican._async_register_webhook_on_device",
+        return_value=True,
+    ):
+        await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+    restored_state = hass.states.get("sensor.wican_device_last_update")
+    assert restored_state is not None
+    assert restored_state.state == first_state.state
 
 
 async def test_pid_sensor_entities_created(
