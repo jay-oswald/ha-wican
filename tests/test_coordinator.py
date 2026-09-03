@@ -116,6 +116,25 @@ async def test_coordinator_device_identity_validation_no_device_id(
     assert coordinator.data == no_device_id_data
 
 
+async def test_coordinator_tracks_last_webhook_time(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_webhook_data: dict,
+) -> None:
+    """Test the coordinator records when a webhook was last handled."""
+    coordinator = WiCANDataUpdateCoordinator(hass, mock_config_entry)
+    await coordinator.async_config_entry_first_refresh()
+
+    assert coordinator.last_webhook_time is None
+
+    before = dt_util.utcnow()
+    coordinator.handle_webhook_data(mock_webhook_data)
+    after = dt_util.utcnow()
+
+    assert coordinator.last_webhook_time is not None
+    assert before <= coordinator.last_webhook_time <= after
+
+
 async def test_coordinator_normalize_sensor_value_voltage(
     hass: HomeAssistant,
     mock_config_entry: MockConfigEntry,

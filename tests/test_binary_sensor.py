@@ -249,3 +249,141 @@ async def test_binary_sensor_none_checks(hass: HomeAssistant, hass_client) -> No
     # Verify entities exist and didn't crash
     state = hass.states.get("binary_sensor.wican_test_ble_status")
     assert state is not None
+
+
+async def test_reporting_sensor_created(
+    hass: HomeAssistant,
+    init_integration: MockConfigEntry,
+) -> None:
+    """The Reporting sensor is created alongside the other binary sensors."""
+    entity_registry = er.async_get(hass)
+
+    reporting = entity_registry.async_get("binary_sensor.wican_device_reporting")
+    assert reporting is not None
+    assert reporting.unique_id.endswith("_reporting")
+
+    state = hass.states.get("binary_sensor.wican_device_reporting")
+    assert state is not None
+    assert state.attributes.get("device_class") == "connectivity"
+
+
+async def test_reporting_sensor_unknown_before_first_webhook(
+    hass: HomeAssistant,
+    init_integration: MockConfigEntry,
+) -> None:
+    """No webhook has arrived yet, so there's nothing to report freshness on."""
+    state = hass.states.get("binary_sensor.wican_device_reporting")
+    assert state is not None
+    assert state.state == "unknown"
+
+
+async def test_reporting_sensor_on_after_webhook(
+    hass: HomeAssistant,
+    init_integration: MockConfigEntry,
+    mock_webhook_data: dict,
+    hass_client,
+) -> None:
+    """A webhook push marks the device as reporting."""
+    entry = init_integration
+    client = await hass_client()
+
+    await client.post(f"/api/webhook/{entry.data[CONF_WEBHOOK_ID]}", json=mock_webhook_data)
+    await hass.async_block_till_done()
+
+    state = hass.states.get("binary_sensor.wican_device_reporting")
+    assert state.state == STATE_ON
+
+
+async def test_reporting_sensor_goes_stale_after_timeout(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_webhook_data: dict,
+    hass_client,
+) -> None:
+    """No further pushes within the timeout flips the sensor off.
+
+    The timeout is normally minutes long (see REPORTING_MIN_TIMEOUT), so this
+    patches it down to a fraction of a second rather than simulating time
+    passing: the stale check is armed via async_call_later, which schedules
+    against the event loop's own monotonic clock and isn't moved by
+    async_fire_time_changed (that only affects wall-clock-based trackers).
+    """
+    import asyncio
+
+    with (
+        patch("custom_components.wican.binary_sensor.REPORTING_STALE_MULTIPLIER", 0),
+        patch("custom_components.wican.binary_sensor.REPORTING_MIN_TIMEOUT", 0.1),
+        patch(
+            "custom_components.wican._async_register_webhook_on_device",
+            return_value=True,
+        ),
+    ):
+        mock_config_entry.add_to_hass(hass)
+        await hass.config_entries.async_setup(mock_config_entry.entry_id)
+        await hass.async_block_till_done()
+
+        client = await hass_client()
+        await client.post(
+            f"/api/webhook/{mock_config_entry.data[CONF_WEBHOOK_ID]}",
+            json=mock_webhook_data,
+        )
+        await hass.async_block_till_done()
+        assert hass.states.get("binary_sensor.wican_device_reporting").state == STATE_ON
+
+        await asyncio.sleep(0.3)
+        await hass.async_block_till_done()
+
+    assert hass.states.get("binary_sensor.wican_device_reporting").state == STATE_OFF
+
+
+async def test_reporting_sensor_restored_state_still_goes_stale(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_webhook_data: dict,
+    hass_client,
+) -> None:
+    """A restored "on" state still gets its own stale-check timer armed.
+
+    Without this, an entity restored as "on" after a Home Assistant restart
+    would stay "on" forever if the device never reports again - nothing
+    would be left to flip it off, since the new session's coordinator has no
+    last_webhook_time of its own yet to recompute freshness from.
+    """
+    import asyncio
+
+    with patch(
+        "custom_components.wican._async_register_webhook_on_device",
+        return_value=True,
+    ):
+        mock_config_entry.add_to_hass(hass)
+        await hass.config_entries.async_setup(mock_config_entry.entry_id)
+        await hass.async_block_till_done()
+
+        client = await hass_client()
+        await client.post(
+            f"/api/webhook/{mock_config_entry.data[CONF_WEBHOOK_ID]}",
+            json=mock_webhook_data,
+        )
+        await hass.async_block_till_done()
+        assert hass.states.get("binary_sensor.wican_device_reporting").state == STATE_ON
+
+        await hass.config_entries.async_unload(mock_config_entry.entry_id)
+        await hass.async_block_till_done()
+
+    with (
+        patch("custom_components.wican.binary_sensor.REPORTING_STALE_MULTIPLIER", 0),
+        patch("custom_components.wican.binary_sensor.REPORTING_MIN_TIMEOUT", 0.1),
+        patch(
+            "custom_components.wican._async_register_webhook_on_device",
+            return_value=True,
+        ),
+    ):
+        await hass.config_entries.async_setup(mock_config_entry.entry_id)
+        await hass.async_block_till_done()
+
+        assert hass.states.get("binary_sensor.wican_device_reporting").state == STATE_ON
+
+        await asyncio.sleep(0.3)
+        await hass.async_block_till_done()
+
+    assert hass.states.get("binary_sensor.wican_device_reporting").state == STATE_OFF

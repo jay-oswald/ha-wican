@@ -49,6 +49,9 @@
         },
         "ecu_status": {
           "name": "ECU Online"
+        },
+        "reporting": {
+          "name": "Reporting"
         }
       },
       "device_tracker": {
