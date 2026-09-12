@@ -727,6 +727,12 @@ _LIFETIME_COUNTER_PIDS: Final[frozenset[str]] = frozenset(
         "ODOMETER",
         "ODOMETER_MI",
         "DIST_SINCE_FULL_CHARGE",
+        # Cumulative seconds the HV battery has spent at 100 % SoC, reported in
+        # days. Like the others it only ever grows, and the useful signal is how
+        # fast - "days added at 100 % this week" is a direct measure of how often
+        # the car is left sitting topped up. As a measurement it would be graphed
+        # as a flat line a few thousandths of a day higher each week.
+        "TIME_AT_100_SOC",
     },
 )
 
