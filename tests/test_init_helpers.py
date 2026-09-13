@@ -163,101 +163,61 @@ def test_normalize_ip_ipv4_mapped_alternate():
     assert _normalize_ip("::ffff:c0a8:0164") == "c0a8:0164"
 
 
-def test_extract_request_ip_from_x_forwarded_for():
-    """Test _extract_request_ip with X-Forwarded-For header."""
-    request = MagicMock(spec=Request)
-    request.headers.get.return_value = "203.0.113.1, 198.51.100.1"
-    request.transport = None
-    request.remote = None
-    
-    result = _extract_request_ip(request)
-    assert result == "203.0.113.1"
-
-
-def test_extract_request_ip_from_x_forwarded_for_with_ipv6():
-    """Test _extract_request_ip with X-Forwarded-For containing IPv6."""
-    request = MagicMock(spec=Request)
-    request.headers.get.return_value = "::ffff:192.168.1.1, 198.51.100.1"
-    request.transport = None
-    request.remote = None
-    
-    result = _extract_request_ip(request)
-    assert result == "192.168.1.1"
-
-
-def test_extract_request_ip_from_transport():
-    """Test _extract_request_ip from transport peername."""
-    request = MagicMock(spec=Request)
-    request.headers.get.return_value = None
-    
-    transport = MagicMock()
-    transport.get_extra_info.return_value = ("192.168.1.50", 12345)
-    request.transport = transport
-    request.remote = None
-    
-    result = _extract_request_ip(request)
-    assert result == "192.168.1.50"
-
-
-def test_extract_request_ip_from_transport_ipv6():
-    """Test _extract_request_ip from transport with IPv6."""
-    request = MagicMock(spec=Request)
-    request.headers.get.return_value = None
-    
-    transport = MagicMock()
-    transport.get_extra_info.return_value = ("::ffff:10.0.0.1", 54321)
-    request.transport = transport
-    request.remote = None
-    
-    result = _extract_request_ip(request)
-    assert result == "10.0.0.1"
-
-
 def test_extract_request_ip_from_remote():
     """Test _extract_request_ip from request.remote."""
     request = MagicMock(spec=Request)
-    request.headers.get.return_value = None
-    request.transport = None
+    request.headers = {}
     request.remote = "172.16.0.1"
-    
+
     result = _extract_request_ip(request)
     assert result == "172.16.0.1"
+
+
+def test_extract_request_ip_normalizes_ipv4_mapped_remote():
+    """Test _extract_request_ip normalizes an IPv4-mapped IPv6 remote."""
+    request = MagicMock(spec=Request)
+    request.headers = {}
+    request.remote = "::ffff:10.0.0.1"
+
+    result = _extract_request_ip(request)
+    assert result == "10.0.0.1"
 
 
 def test_extract_request_ip_no_ip_found():
     """Test _extract_request_ip when no IP is available."""
     request = MagicMock(spec=Request)
-    request.headers.get.return_value = None
-    request.transport = None
+    request.headers = {}
     request.remote = None
-    
+
     result = _extract_request_ip(request)
     assert result is None
 
 
-def test_extract_request_ip_transport_no_peername():
-    """Test _extract_request_ip when transport has no peername."""
+def test_extract_request_ip_ignores_x_forwarded_for():
+    """An untrusted X-Forwarded-For must not override the peer address.
+
+    The stored IP is where the integration POSTs the webhook registration,
+    which carries the webhook URL. Home Assistant resolves X-Forwarded-For
+    into request.remote itself, but only when the operator configured
+    use_x_forwarded_for with trusted_proxies; honouring the raw header would
+    let any client that can reach the webhook redirect that POST.
+    """
     request = MagicMock(spec=Request)
-    request.headers.get.return_value = None
-    
-    transport = MagicMock()
-    transport.get_extra_info.return_value = None
-    request.transport = transport
-    request.remote = "10.0.0.5"
-    
+    request.headers = {"X-Forwarded-For": "203.0.113.1, 198.51.100.1"}
+    request.remote = "192.168.1.50"
+
     result = _extract_request_ip(request)
-    assert result == "10.0.0.5"
+    assert result == "192.168.1.50"
 
 
-def test_extract_request_ip_transport_empty_peername():
-    """Test _extract_request_ip when peername is empty."""
+def test_extract_request_ip_ignores_transport_peername():
+    """The raw transport bypasses the forwarded middleware, so it is not used."""
     request = MagicMock(spec=Request)
-    request.headers.get.return_value = None
-    
+    request.headers = {}
     transport = MagicMock()
-    transport.get_extra_info.return_value = []
+    transport.get_extra_info.return_value = ("198.51.100.9", 12345)
     request.transport = transport
-    request.remote = "10.0.0.6"
-    
+    request.remote = "192.168.1.50"
+
     result = _extract_request_ip(request)
-    assert result == "10.0.0.6"
+    assert result == "192.168.1.50"

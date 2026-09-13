@@ -170,23 +170,19 @@ def _normalize_ip(ip: str | None) -> str | None:
 
 
 def _extract_request_ip(request: Request) -> str | None:
-    """Best-effort extraction of the originating peer IP address."""
-    forwarded_for = request.headers.get("X-Forwarded-For")
-    if forwarded_for:
-        first = forwarded_for.split(",")[0].strip()
-        if first:
-            return _normalize_ip(first)
+    """Return the IP the webhook request came from.
 
-    transport = request.transport
-    if transport is not None:
-        peername = transport.get_extra_info("peername")
-        if isinstance(peername, (tuple, list)) and peername:
-            return _normalize_ip(peername[0])
+    request.remote is the only trustworthy source. Home Assistant's forwarded
+    middleware already resolves X-Forwarded-For into it, but only when the
+    operator has set use_x_forwarded_for together with trusted_proxies -
+    reading the header here instead would accept it from anyone.
 
-    if request.remote:
-        return _normalize_ip(request.remote)
-
-    return None
+    That matters because this address is stored on the config entry and the
+    integration then POSTs the webhook registration, which carries the webhook
+    URL, to it. Honouring an unvalidated header would let any client that can
+    reach the webhook endpoint redirect that request to a host of its choosing.
+    """
+    return _normalize_ip(request.remote)
 
 
 async def async_setup_entry(  # noqa: C901, PLR0915
@@ -277,6 +273,20 @@ async def async_setup_entry(  # noqa: C901, PLR0915
                 text=error.error_message, status=HTTPStatus.UNPROCESSABLE_ENTITY,
             )
 
+        # Update coordinator with new data.
+        # This runs before anything is persisted: it rejects a payload whose
+        # device_id does not match the configured device, and the connection
+        # info below is only trustworthy once that has passed.
+        try:
+            coordinator.handle_webhook_data(data)
+        except ConfigEntryError:
+            # Device identity mismatch - log error and reject webhook
+            _LOGGER.exception("Rejecting webhook due to device identity validation failure")
+            return Response(
+                text="Device identity mismatch",
+                status=HTTPStatus.FORBIDDEN,
+            )
+
         # Extract device info fields from top-level or nested "status"
         device_info_fields = {}
         status = data.get("status", {})
@@ -328,17 +338,6 @@ async def async_setup_entry(  # noqa: C901, PLR0915
                     hass.async_create_task(
                         _async_register_webhook_on_device(hass, entry),
                     )
-
-        # Update coordinator with new data
-        try:
-            coordinator.handle_webhook_data(data)
-        except ConfigEntryError:
-            # Device identity mismatch - log error and reject webhook
-            _LOGGER.exception("Rejecting webhook due to device identity validation failure")
-            return Response(
-                text="Device identity mismatch",
-                status=HTTPStatus.FORBIDDEN,
-            )
 
         # Keep dispatcher for backward compatibility during migration
         async_dispatcher_send(hass, DOMAIN, webhook_id, data)

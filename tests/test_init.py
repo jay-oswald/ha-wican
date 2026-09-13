@@ -116,8 +116,75 @@ async def test_webhook_device_identity_mismatch(
         json=wrong_device_data,
     )
 
-    # Integration accepts data from any device on this webhook (doesn't validate device_id)
+    # The coordinator validates device_id and the handler turns the resulting
+    # ConfigEntryError into a 403
+    assert resp.status == 403
+
+
+async def test_webhook_identity_mismatch_does_not_persist_connection_info(
+    hass: HomeAssistant,
+    init_integration: MockConfigEntry,
+    hass_client,
+) -> None:
+    """A rejected payload must not move the device address.
+
+    The stored address is where the integration POSTs the webhook
+    registration, which carries the webhook URL. Connection info used to be
+    written - and a re-registration scheduled against it - before the
+    device_id was checked, so a rejected payload could still redirect it.
+    """
+    entry = init_integration
+    original_ip = entry.data.get("ip")
+    original_host = entry.data.get("host")
+
+    client = await hass_client()
+
+    with patch(
+        "custom_components.wican._async_register_webhook_on_device",
+        AsyncMock(return_value=True),
+    ) as mock_register:
+        resp = await client.post(
+            f"/api/webhook/{entry.data[CONF_WEBHOOK_ID]}",
+            json={
+                "status": {
+                    "device_id": "different_device_456",
+                    "host": "http://198.51.100.9",
+                    "ip": "198.51.100.9",
+                },
+            },
+        )
+        await hass.async_block_till_done()
+
+    assert resp.status == 403
+    assert entry.data.get("ip") == original_ip
+    assert entry.data.get("host") == original_host
+    mock_register.assert_not_called()
+
+
+async def test_webhook_from_configured_device_persists_source_ip(
+    hass: HomeAssistant,
+    init_integration: MockConfigEntry,
+    mock_webhook_data: dict,
+    hass_client,
+) -> None:
+    """A payload from the configured device still records where it came from."""
+    entry = init_integration
+
+    client = await hass_client()
+
+    with patch(
+        "custom_components.wican._async_register_webhook_on_device",
+        AsyncMock(return_value=True),
+    ):
+        resp = await client.post(
+            f"/api/webhook/{entry.data[CONF_WEBHOOK_ID]}",
+            json=mock_webhook_data,
+        )
+        await hass.async_block_till_done()
+
     assert resp.status == 204
+    # hass_client connects over loopback
+    assert entry.data.get("ip") == "127.0.0.1"
 
 
 async def test_entry_updated(
