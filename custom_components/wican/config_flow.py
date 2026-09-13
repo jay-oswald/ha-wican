@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+from http import HTTPStatus
 import logging
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
+import aiohttp
 from homeassistant import config_entries
 from homeassistant.components import onboarding
 from homeassistant.const import CONF_HOST, CONF_WEBHOOK_ID
 from homeassistant.core import callback
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
 import voluptuous as vol
 from yarl import URL
 
@@ -25,10 +28,15 @@ from .helpers import resolve_webhook_url
 if TYPE_CHECKING:
     from ipaddress import IPv4Address, IPv6Address
 
+    from homeassistant.core import HomeAssistant
     from homeassistant.data_entry_flow import FlowResult
     from homeassistant.helpers.service_info.zeroconf import ZeroconfServiceInfo
 
 _LOGGER = logging.getLogger(__name__)
+
+# The device is on the local network, so a status request either answers
+# immediately or is not going to answer at all.
+STATUS_TIMEOUT = aiohttp.ClientTimeout(total=5)
 
 
 class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
@@ -64,6 +72,20 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 entry_data["mdns"] = _format_http_url(mdns, None) or mdns
             if host:
                 entry_data["host"] = _format_http_url(host, None) or host
+
+            # Ask the device who it is before creating the entry. Without a
+            # device_id the device registry keys the device on the config entry
+            # id; the first webhook then supplies the real device_id and the
+            # entities move to a second device, leaving the first one orphaned.
+            device_id = await _fetch_device_id(
+                self.hass,
+                entry_data.get("host"),
+                entry_data.get("mdns"),
+            )
+            if device_id:
+                entry_data["device_id"] = device_id
+                await self.async_set_unique_id(device_id)
+                self._abort_if_unique_id_configured()
 
             return self.async_create_entry(
                 title=title,
@@ -211,6 +233,41 @@ class WiCANOptionsFlow(config_entries.OptionsFlow):
             },
         )
         return self.async_show_form(step_id="init", data_schema=data_schema)
+
+
+async def _fetch_device_id(hass: HomeAssistant, *urls: str | None) -> str | None:
+    """Read the device_id a WiCAN reports on its /status endpoint.
+
+    Args:
+        hass: The Home Assistant instance.
+        urls: Base URLs to try, in order, until one answers.
+
+    Returns:
+        The reported device_id, or None if no URL answered with one.
+    """
+    session = async_get_clientsession(hass)
+    for url in urls:
+        if not url:
+            continue
+
+        status_url = f"{url.rstrip('/')}/status"
+        try:
+            async with session.get(status_url, timeout=STATUS_TIMEOUT) as response:
+                if response.status != HTTPStatus.OK:
+                    _LOGGER.debug("Status request to %s returned HTTP %s", status_url, response.status)
+                    continue
+                status = await response.json(content_type=None)
+        except (TimeoutError, aiohttp.ClientError, ValueError) as err:
+            _LOGGER.debug("Could not read device_id from %s: %s", status_url, err)
+            continue
+
+        device_id = status.get("device_id") if isinstance(status, dict) else None
+        if device_id:
+            return str(device_id)
+
+        _LOGGER.debug("No device_id in the status reported by %s", status_url)
+
+    return None
 
 
 def _format_http_url(address: str | None, port: int | None) -> str | None:

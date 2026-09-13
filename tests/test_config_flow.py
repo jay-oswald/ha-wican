@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, patch
+from typing import TYPE_CHECKING
+from unittest.mock import AsyncMock, MagicMock, patch
 
+import aiohttp
 import pytest
 
 from homeassistant import config_entries
@@ -15,6 +17,42 @@ from homeassistant.const import CONF_NAME, CONF_WEBHOOK_ID
 from custom_components.wican.const import DOMAIN
 
 from pytest_homeassistant_custom_component.common import MockConfigEntry
+
+if TYPE_CHECKING:
+    from collections.abc import Generator
+
+
+def _status_session(
+    *,
+    device_id: str | None = None,
+    error: Exception | None = None,
+) -> MagicMock:
+    """Return a mock client session answering the WiCAN /status endpoint."""
+    session = MagicMock()
+    if error is not None:
+        session.get = MagicMock(side_effect=error)
+        return session
+
+    response = MagicMock()
+    response.status = 200
+    response.json = AsyncMock(
+        return_value={"device_id": device_id} if device_id else {},
+    )
+    request = MagicMock()
+    request.__aenter__ = AsyncMock(return_value=response)
+    request.__aexit__ = AsyncMock(return_value=False)
+    session.get = MagicMock(return_value=request)
+    return session
+
+
+@pytest.fixture(autouse=True)
+def mock_status_unreachable() -> Generator[MagicMock]:
+    """Make the manual flow's status request fail unless a test says otherwise."""
+    with patch(
+        "custom_components.wican.config_flow.async_get_clientsession",
+        return_value=_status_session(error=aiohttp.ClientError("unreachable")),
+    ) as mock_session:
+        yield mock_session
 
 
 async def test_user_flow_success(
@@ -81,6 +119,81 @@ async def test_user_flow_adds_http_scheme(
 
     assert result2["type"] == FlowResultType.CREATE_ENTRY
     assert result2["data"]["mdns"] == "http://wican_test.local"
+
+
+async def test_user_flow_fetches_device_id(hass: HomeAssistant) -> None:
+    """Test the manual flow stores the device_id the device reports."""
+    session = _status_session(device_id="abc123")
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN,
+        context={"source": config_entries.SOURCE_USER},
+    )
+
+    with (
+        patch(
+            "custom_components.wican.config_flow.async_get_clientsession",
+            return_value=session,
+        ),
+        patch("custom_components.wican.async_setup_entry", return_value=True),
+    ):
+        result2 = await hass.config_entries.flow.async_configure(
+            result["flow_id"],
+            {"mdns": "wican_test.local", "host": "192.168.1.50"},
+        )
+
+    await hass.async_block_till_done()
+
+    assert result2["type"] == FlowResultType.CREATE_ENTRY
+    assert result2["data"]["device_id"] == "abc123"
+    assert result2["result"].unique_id == "abc123"
+    # The host is the more reliable address, so it is tried first.
+    assert session.get.call_args.args[0] == "http://192.168.1.50/status"
+
+
+async def test_user_flow_status_unreachable(hass: HomeAssistant) -> None:
+    """Test the manual flow still creates the entry when /status does not answer."""
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN,
+        context={"source": config_entries.SOURCE_USER},
+    )
+
+    with patch("custom_components.wican.async_setup_entry", return_value=True):
+        result2 = await hass.config_entries.flow.async_configure(
+            result["flow_id"],
+            {"mdns": "wican_test.local"},
+        )
+
+    await hass.async_block_till_done()
+
+    assert result2["type"] == FlowResultType.CREATE_ENTRY
+    assert "device_id" not in result2["data"]
+    assert result2["result"].unique_id is None
+
+
+async def test_user_flow_duplicate_device_id_aborts(hass: HomeAssistant) -> None:
+    """Test the manual flow aborts when the device is already configured."""
+    MockConfigEntry(
+        domain=DOMAIN,
+        unique_id="abc123",
+        data={CONF_WEBHOOK_ID: "existing", "device_id": "abc123"},
+    ).add_to_hass(hass)
+
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN,
+        context={"source": config_entries.SOURCE_USER},
+    )
+
+    with patch(
+        "custom_components.wican.config_flow.async_get_clientsession",
+        return_value=_status_session(device_id="abc123"),
+    ):
+        result2 = await hass.config_entries.flow.async_configure(
+            result["flow_id"],
+            {"mdns": "wican_test.local"},
+        )
+
+    assert result2["type"] == FlowResultType.ABORT
+    assert result2["reason"] == "already_configured"
 
 
 async def test_zeroconf_flow_success(
