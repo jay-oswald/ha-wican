@@ -18,6 +18,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from .const import DOMAIN
 
 if TYPE_CHECKING:
+    from homeassistant.core import CALLBACK_TYPE
     from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
     from . import WiCANConfigEntry
@@ -27,9 +28,47 @@ _LOGGER = logging.getLogger(__name__)
 # Entity will be named "WiCAN Device Location" with has_entity_name=True
 TRACKER_NAME = "Location"
 
+# Persisted once a device proves it can report a fix, so a firmware update that
+# adds GPS to a model this integration otherwise assumes can't isn't permanently
+# missing a tracker.
+CONF_HAS_REPORTED_GPS = "has_reported_gps"
+
+
+def _expects_gps(config_entry: WiCANConfigEntry) -> bool:
+    """Return whether to create the tracker up front, or wait for a real fix.
+
+    Creating it unconditionally left it permanently "unknown" on WiCAN-OBD and
+    -USB hardware: no current firmware build populates the webhook's "gps" key
+    on those models, only WiCAN-PRO ships a GPS module.
+
+    This is an allow-list on "pro", not a deny-list on "obd"/"usb", for two
+    reasons:
+
+    * The firmware reports hw_version as "WiCAN-" + one of "OBD" / "USB" /
+      "OBD-PRO" (wican-fw CMakeLists.txt). A deny-list containing "obd" matches
+      "WiCAN-OBD-PRO" too, so it skipped the tracker on the one model that
+      actually has GPS.
+    * **hw_version is not in config_entry.data when this runs on a fresh
+      install.** Only the webhook handler writes it, from the first POST, and
+      the platforms are set up well before that. A deny-list therefore saw an
+      empty string, fell through to "create it", and every device got the
+      permanently-unavailable entity this was meant to prevent - which survived
+      as an orphaned registry entry even after hw_version arrived.
+
+    An unknown hw_version now waits for a fix instead of guessing. A PRO that
+    has not been configured before gets its tracker one webhook late, and
+    eagerly on every start after that.
+
+    "pro" in hw_version is how __init__.py and update.py already identify a PRO.
+    """
+    if config_entry.data.get(CONF_HAS_REPORTED_GPS):
+        return True
+
+    return "pro" in str(config_entry.data.get("hw_version", "")).lower()
+
 
 async def async_setup_entry(
-    _hass: HomeAssistant,
+    hass: HomeAssistant,
     config_entry: WiCANConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
@@ -38,12 +77,52 @@ async def async_setup_entry(
     Creates a single device_tracker entity that represents the GPS location
     of the WiCAN device (typically mounted in a vehicle).
     """
+    if _expects_gps(config_entry):
+        async_add_entities([WiCANDeviceTrackerEntity(config_entry)])
+        _LOGGER.debug("Device tracker entity created for %s", config_entry.title)
+        return
 
-    # Always create the tracker entity - it will show as unavailable if no GPS data
-    entity = WiCANDeviceTrackerEntity(config_entry)
-    async_add_entities([entity])
+    _LOGGER.debug(
+        "Deferring device tracker for %s (hw_version=%r) until a GPS fix arrives",
+        config_entry.title,
+        config_entry.data.get("hw_version"),
+    )
 
-    _LOGGER.debug("Device tracker entity created for %s", config_entry.title)
+    coordinator = config_entry.runtime_data.coordinator
+
+    # The coordinator remover raises KeyError if called twice, and this one is
+    # reachable from two places: the callback below, once a fix has arrived, and
+    # the entry unload. Collapse them into one idempotent call - an exception
+    # raised out of _async_process_on_unload() aborts the unload, so the entry
+    # could no longer be reloaded, reconfigured or deleted.
+    unsub: CALLBACK_TYPE | None = None
+
+    @callback
+    def _unsubscribe() -> None:
+        nonlocal unsub
+        if unsub is not None:
+            unsub()
+            unsub = None
+
+    @callback
+    def _create_tracker_on_first_fix() -> None:
+        gps_data = coordinator.data.get("gps", {}) if coordinator.data else {}
+        if gps_data.get("latitude") is None or gps_data.get("longitude") is None:
+            return
+
+        _unsubscribe()
+        new_data = dict(config_entry.data)
+        new_data[CONF_HAS_REPORTED_GPS] = True
+        hass.config_entries.async_update_entry(config_entry, data=new_data)
+
+        async_add_entities([WiCANDeviceTrackerEntity(config_entry)])
+        _LOGGER.debug(
+            "First GPS fix received from %s; device tracker created",
+            config_entry.title,
+        )
+
+    unsub = coordinator.async_add_listener(_create_tracker_on_first_fix)
+    config_entry.async_on_unload(_unsubscribe)
 
 
 class WiCANDeviceTrackerEntity(CoordinatorEntity, TrackerEntity, RestoreEntity):
