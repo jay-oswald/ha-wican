@@ -8,6 +8,11 @@ from typing import TYPE_CHECKING
 from homeassistant.components.sensor import (
     RestoreSensor,
     SensorDeviceClass,
+    SensorStateClass,
+)
+from homeassistant.components.sensor.const import (
+    DEVICE_CLASS_STATE_CLASSES,
+    DEVICE_CLASS_UNITS,
 )
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
@@ -18,9 +23,11 @@ from .entity import WiCANEntity
 from .param_loader import (
     get_param_device_class,
     get_param_icon,
+    get_param_state_class,
     get_param_unit,
     is_valid_class_unit_combo,
     is_valid_device_class,
+    normalize_unit,
 )
 
 if TYPE_CHECKING:
@@ -30,6 +37,17 @@ if TYPE_CHECKING:
 
 _LOGGER = logging.getLogger(__name__)
 PARALLEL_UPDATES = 0
+
+# Params classed "energy" upstream that are actually a capacity or a
+# remaining-charge level, not a cumulative counter. HA's "energy" device
+# class permits only "total"/"total_increasing" state classes (see
+# DEVICE_CLASS_STATE_CLASSES) - forcing either onto a level value would
+# report it as ever-accumulating, which it is not. "energy_storage" is the
+# device class for exactly this shape of value and still permits
+# "measurement".
+_ENERGY_LEVEL_PIDS: frozenset[str] = frozenset(
+    {"HV_CAPACITY_KWH", "HV_CAPACITY_R", "HV_KWH_R"},
+)
 
 
 def _get_pid_unit(pid_key: str, config_unit: str | None = None) -> str | None:
@@ -41,6 +59,10 @@ def _get_pid_unit(pid_key: str, config_unit: str | None = None) -> str | None:
 
     This ensures consistent units even if device sometimes sends None.
 
+    Both sources are run through normalize_unit(), which drops placeholders
+    ("none", "Encoded") and rewrites firmware spellings HA does not accept
+    ("degC" -> "°C", "volts" -> "V").
+
     Args:
         pid_key: The PID sensor key/name from the device.
         config_unit: Unit from device config (may be None/empty/"none").
@@ -48,16 +70,13 @@ def _get_pid_unit(pid_key: str, config_unit: str | None = None) -> str | None:
     Returns:
         Unit string (e.g., "km/h", "°C") or None if no match.
     """
-    # Normalize "none", empty string, None to actual None
-    if config_unit in ("none", "", None):
-        config_unit = None
-
     # If device provided a valid unit, use it
-    if config_unit is not None:
-        return config_unit
+    unit = normalize_unit(config_unit)
+    if unit is not None:
+        return unit
 
     # Fallback to params.json lookup
-    return get_param_unit(pid_key)
+    return normalize_unit(get_param_unit(pid_key))
 
 
 def _get_pid_icon(
@@ -79,7 +98,7 @@ def _get_pid_icon(
     return get_param_icon(pid_key, device_class_str)
 
 
-def _normalize_device_class(
+def _normalize_device_class(  # noqa: C901
     device_class: str | SensorDeviceClass | None,
     unit: str | None,
     pid_key: str | None = None,
@@ -124,6 +143,15 @@ def _normalize_device_class(
             )
             return None
 
+    # A handful of params are classed "energy" upstream but are actually a
+    # capacity/level rather than a cumulative counter - see _ENERGY_LEVEL_PIDS.
+    if (
+        device_class == SensorDeviceClass.ENERGY
+        and pid_key
+        and pid_key.upper() in _ENERGY_LEVEL_PIDS
+    ):
+        device_class = SensorDeviceClass.ENERGY_STORAGE
+
     # Validate class+unit combination
     if device_class is not None and unit is not None:
         dc_str = device_class.value if isinstance(device_class, SensorDeviceClass) else str(device_class)
@@ -134,7 +162,87 @@ def _normalize_device_class(
             )
             return None
 
+    # Home Assistant's own table is authoritative and covers every device
+    # class, including the ones _DEVICE_CLASS_VALID_UNITS has no rules for.
+    # The firmware pairs classes with units HA rejects (e.g. gas + "ratio",
+    # volume_storage + "%", or a temperature class with no unit at all);
+    # keeping the class would cost the sensor its unit conversion and its
+    # long-term statistics, so drop the class and keep the raw measurement.
+    if device_class is not None:
+        valid_units = DEVICE_CLASS_UNITS.get(device_class)
+        if valid_units is not None and unit not in valid_units:
+            _LOGGER.debug(
+                "Unit %s is not valid for device_class %s on %s, dropping device_class",
+                unit, device_class, pid_key or "sensor",
+            )
+            return None
+
     return device_class
+
+
+def _get_pid_state_class(  # noqa: PLR0911
+    unit: str | None,
+    device_class: SensorDeviceClass | None,
+    pid_key: str | None = None,
+) -> SensorStateClass | None:
+    """Determine the state class for a PID sensor.
+
+    Numeric PIDs need a state class to be graphed and recorded as long-term
+    statistics. Without one HA treats them as plain text sensors, which is
+    what standard PIDs such as 42-ControlModuleVolt and 46-AmbientAirTemp
+    used to look like.
+
+    Which state class depends on the device class: HA restricts each device
+    class to a specific set via DEVICE_CLASS_STATE_CLASSES. "energy" for
+    example permits only "total"/"total_increasing", never "measurement" -
+    passing "measurement" regardless is what made KWH_CHARGED and
+    KWH_DISCHARGED fail HA's validation ("using state class 'measurement'
+    which is impossible considering device class ('energy')").
+
+    Non-numeric PIDs (gear, drive mode, the flags a profile marks as binary)
+    must NOT get a state class: HA raises on a measurement sensor whose state
+    is not numeric.
+
+    Args:
+        unit: The resolved unit of measurement, if any.
+        device_class: The resolved SensorDeviceClass, if any.
+        pid_key: PID key, used to look up whether this is a known lifetime
+            counter (get_param_state_class()) that should prefer
+            "total_increasing" over "measurement" when both are permitted.
+
+    Returns:
+        The best SensorStateClass for this PID: None when the device class
+        permits none (DATE/ENUM/TIMESTAMP) or when the PID carries no unit
+        and no device class at all, otherwise the preferred state class the
+        device class allows.
+    """
+    # A PID that reports neither a unit nor a device class carries a label,
+    # not a measurement.
+    if device_class is None and unit is None:
+        return None
+
+    hint: SensorStateClass | None = None
+    if pid_key and get_param_state_class(pid_key) == "total_increasing":
+        hint = SensorStateClass.TOTAL_INCREASING
+
+    if device_class is None:
+        return hint or SensorStateClass.MEASUREMENT
+
+    allowed = DEVICE_CLASS_STATE_CLASSES.get(device_class)
+    if allowed is None:
+        # Not in HA's table - shouldn't happen, since it covers every device
+        # class _normalize_device_class() can return. Fall back to the
+        # historical behaviour rather than silently dropping the state class.
+        return SensorStateClass.MEASUREMENT
+    if not allowed:
+        return None
+    if hint is not None and hint in allowed:
+        return hint
+    if SensorStateClass.MEASUREMENT in allowed:
+        return SensorStateClass.MEASUREMENT
+    if SensorStateClass.TOTAL_INCREASING in allowed:
+        return SensorStateClass.TOTAL_INCREASING
+    return SensorStateClass.TOTAL
 
 
 DYNAMIC_PID_SENSORS = {}
@@ -163,11 +271,12 @@ async def async_setup_entry(  # noqa: C901
         # Use _get_pid_unit with config unit for consistent fallback handling
         unit = _get_pid_unit(pid_key, config.get("unit"))
         device_class = _normalize_device_class(config.get("class"), unit, pid_key)
+        state_class = _get_pid_state_class(unit, device_class, pid_key)
         icon = _get_pid_icon(pid_key, device_class)
 
         _LOGGER.debug(
-            "Restoring PID sensor %s with unit=%s, device_class=%s, icon=%s",
-            pid_key, unit, device_class, icon,
+            "Restoring PID sensor %s with unit=%s, device_class=%s, state_class=%s, icon=%s",
+            pid_key, unit, device_class, state_class, icon,
         )
 
         entity_description = WiCANSensorEntityDescription(
@@ -175,7 +284,7 @@ async def async_setup_entry(  # noqa: C901
             name=pid_key,
             device_class=device_class,
             native_unit_of_measurement=unit,
-            state_class="measurement",
+            state_class=state_class,
             icon=icon,
         )
         entity = WiCANPidSensorEntity(config_entry, pid_key, entity_description)
@@ -199,11 +308,12 @@ async def async_setup_entry(  # noqa: C901
                 # Use _get_pid_unit with config unit for consistent fallback handling
                 unit = _get_pid_unit(pid_key, config.get("unit"))
                 device_class = _normalize_device_class(config.get("class"), unit, pid_key)
+                state_class = _get_pid_state_class(unit, device_class, pid_key)
                 icon = _get_pid_icon(pid_key, device_class)
 
                 _LOGGER.debug(
-                    "Creating new PID sensor %s with unit=%s, device_class=%s, icon=%s",
-                    pid_key, unit, device_class, icon,
+                    "Creating new PID sensor %s with unit=%s, device_class=%s, state_class=%s, icon=%s",
+                    pid_key, unit, device_class, state_class, icon,
                 )
 
                 entity_description = WiCANSensorEntityDescription(
@@ -211,6 +321,7 @@ async def async_setup_entry(  # noqa: C901
                     name=pid_key,
                     device_class=device_class,
                     native_unit_of_measurement=unit,
+                    state_class=state_class,
                     icon=icon,
                 )
                 entity = WiCANPidSensorEntity(config_entry, pid_key, entity_description)

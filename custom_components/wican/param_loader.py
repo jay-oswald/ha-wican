@@ -169,6 +169,78 @@ PARAM_NAME_ICONS: Final[dict[str, str]] = {
 DEFAULT_PARAM_ICON: Final[str] = "mdi:car-info"
 
 
+# Placeholder strings the firmware uses in the "unit" field to mean
+# "this value has no unit". "Encoded" is used by the 16 standard PIDs that
+# report packed bitfields (PIDsSupported, MonitorStatus, FuelSysStat, ...).
+_NON_UNITS: Final[frozenset[str]] = frozenset({"", "-", "encoded", "n/a", "none"})
+
+# Unit spellings used by the WiCAN firmware and by the upstream params.json
+# that Home Assistant does not recognise, mapped to the spelling HA expects.
+#
+# HA validates native_unit_of_measurement against the sensor's device class, so
+# a sensor reporting "degC" for a temperature device class loses its unit
+# conversion and its long-term statistics. obd2_standard_pids.h alone uses
+# "degC" for 13 PIDs (including 46-AmbientAirTemp), "volts" for 16 PIDs, and
+# "seconds"/"minutes"/"hours" for the duration PIDs.
+#
+# Keys are lower-cased; anything not listed here is passed through untouched.
+_UNIT_ALIASES: Final[dict[str, str]] = {
+    # Temperature
+    "degc": "°C",
+    "degf": "°F",
+    "degk": "K",
+    # Electrical
+    "volts": "V",
+    "volt": "V",
+    "millivolts": "mV",
+    "amps": "A",
+    "amp": "A",
+    "milliamps": "mA",
+    "watts": "W",
+    "watt": "W",
+    "kilowatts": "kW",
+    # Time
+    "seconds": "s",
+    "sec": "s",
+    "minutes": "min",
+    "mins": "min",
+    "hours": "h",
+    "hour": "h",
+    # Pressure (params.json spells kPa both "kPa" and "KPa")
+    "kpa": "kPa",
+    "hpa": "hPa",
+    # Flow rate
+    "grams/sec": "g/s",
+    # Speed
+    "kph": "km/h",
+    "km/hr": "km/h",
+    # Rotational speed (params.json spells it both "rpm" and "RPM")
+    "rpm": "rpm",
+}
+
+
+def normalize_unit(unit: str | None) -> str | None:
+    """Map a firmware unit string onto the spelling Home Assistant expects.
+
+    Args:
+        unit: Raw unit string from the device config or params.json.
+
+    Returns:
+        The canonical HA unit, or None when the string is a placeholder rather
+        than a real unit. Unrecognised units are returned stripped but
+        otherwise unchanged, so custom units still reach HA.
+    """
+    if unit is None:
+        return None
+
+    stripped = unit.strip()
+    lowered = stripped.lower()
+    if lowered in _NON_UNITS:
+        return None
+
+    return _UNIT_ALIASES.get(lowered, stripped)
+
+
 def _get_params_file_path() -> Path:
     """Get the path to the params.json file."""
     return Path(__file__).parent / "data" / "params.json"
@@ -638,6 +710,45 @@ def get_param_device_class(param_name: str) -> str | None:
         if device_class and device_class.lower() not in ("", "none"):
             return device_class
 
+    return None
+
+
+# Params that report a monotonically increasing lifetime total rather than an
+# instantaneous measurement. HA's "total_increasing" state class is built for
+# exactly this shape of data: a decrease is treated as the start of a new
+# accumulation cycle (e.g. an odometer rollover, or DIST_SINCE_FULL_CHARGE
+# resetting to 0 at every full charge) rather than graphed as a drop.
+_LIFETIME_COUNTER_PIDS: Final[frozenset[str]] = frozenset(
+    {
+        "KWH_CHARGED",
+        "KWH_DISCHARGED",
+        "HV_AH_CHARGED",
+        "HV_AH_DISCHARGED",
+        "ODOMETER",
+        "ODOMETER_MI",
+        "DIST_SINCE_FULL_CHARGE",
+        # Cumulative seconds the HV battery has spent at 100 % SoC, reported in
+        # days. Like the others it only ever grows, and the useful signal is how
+        # fast - "days added at 100 % this week" is a direct measure of how often
+        # the car is left sitting topped up. As a measurement it would be graphed
+        # as a flat line a few thousandths of a day higher each week.
+        "TIME_AT_100_SOC",
+    },
+)
+
+
+def get_param_state_class(param_name: str) -> str | None:
+    """Get the suggested state class for a parameter, if it is a known lifetime counter.
+
+    Args:
+        param_name: Parameter name (case-insensitive, supports various formats).
+
+    Returns:
+        "total_increasing" for known lifetime counters, None otherwise.
+    """
+    key = _normalize_param_name(param_name)
+    if key in _LIFETIME_COUNTER_PIDS:
+        return "total_increasing"
     return None
 
 

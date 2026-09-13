@@ -8,13 +8,68 @@ from custom_components.wican.param_loader import (
     get_param_unit,
     get_param_device_class,
     get_param_icon,
+    get_param_state_class,
     get_param_description,
     is_binary_sensor,
     get_all_params,
      is_valid_device_class,
     is_valid_class_unit_combo,
+    normalize_unit,
     DEFAULT_PARAM_ICON,
 )
+
+
+class TestNormalizeUnit:
+    """Tests for normalize_unit function."""
+
+    def test_firmware_temperature_spelling(self) -> None:
+        """Firmware reports degC/degF, HA only accepts the degree-sign form."""
+        assert normalize_unit("degC") == "°C"
+        assert normalize_unit("degF") == "°F"
+        assert normalize_unit("degK") == "K"
+
+    def test_firmware_electrical_spellings(self) -> None:
+        """obd2_standard_pids.h uses "volts" for 16 PIDs."""
+        assert normalize_unit("volts") == "V"
+        assert normalize_unit("amps") == "A"
+        assert normalize_unit("watts") == "W"
+
+    def test_firmware_time_spellings(self) -> None:
+        """Duration PIDs report seconds/minutes/hours."""
+        assert normalize_unit("seconds") == "s"
+        assert normalize_unit("minutes") == "min"
+        assert normalize_unit("hours") == "h"
+
+    def test_case_insensitive(self) -> None:
+        """params.json spells the same unit several ways."""
+        assert normalize_unit("KPa") == "kPa"
+        assert normalize_unit("kPa") == "kPa"
+        assert normalize_unit("RPM") == "rpm"
+        assert normalize_unit("VOLTS") == "V"
+
+    def test_placeholders_become_none(self) -> None:
+        """Placeholders are not units and must not reach HA as one."""
+        for placeholder in ("none", "None", "", "  ", "Encoded", "n/a", "-"):
+            assert normalize_unit(placeholder) is None, placeholder
+
+    def test_none_input(self) -> None:
+        """None passes through as None."""
+        assert normalize_unit(None) is None
+
+    def test_already_valid_units_unchanged(self) -> None:
+        """Units HA already accepts are returned untouched."""
+        for unit in ("°C", "V", "A", "km/h", "%", "kWh", "min", "mA"):
+            assert normalize_unit(unit) == unit, unit
+
+    def test_unknown_units_pass_through(self) -> None:
+        """Custom units are preserved so bespoke PIDs still report a unit."""
+        for unit in ("Nm", "mg/stroke", "kOhm", "L/h", "count"):
+            assert normalize_unit(unit) == unit, unit
+
+    def test_whitespace_stripped(self) -> None:
+        """Surrounding whitespace is trimmed."""
+        assert normalize_unit("  degC  ") == "°C"
+        assert normalize_unit(" km/h ") == "km/h"
 
 
 class TestGetParamUnit:
@@ -467,3 +522,33 @@ class TestGitHubParamsUpdate:
         params = get_all_params()
         assert isinstance(params, dict)
         assert "SOC" in params  # Known param should still exist
+
+class TestGetParamStateClass:
+    """Tests for get_param_state_class function."""
+
+    def test_lifetime_counters(self) -> None:
+        """Cumulative totals are flagged so they can be total_increasing."""
+        for name in (
+            "KWH_CHARGED",
+            "KWH_DISCHARGED",
+            "HV_AH_CHARGED",
+            "HV_AH_DISCHARGED",
+            "ODOMETER",
+            "DIST_SINCE_FULL_CHARGE",
+            "TIME_AT_100_SOC",
+        ):
+            assert get_param_state_class(name) == "total_increasing", name
+
+    def test_alias_spellings_resolve(self) -> None:
+        """Alias forms of a counter resolve too."""
+        assert get_param_state_class("a6-odometer") == "total_increasing"
+        assert get_param_state_class("odometer") == "total_increasing"
+
+    def test_instantaneous_params_have_no_hint(self) -> None:
+        """Values that are levels or readings get no hint."""
+        for name in ("SOC", "HV_V", "RANGE", "HV_CAPACITY_KWH", "HV_KWH_R"):
+            assert get_param_state_class(name) is None, name
+
+    def test_unknown_param(self) -> None:
+        """Unknown names get no hint."""
+        assert get_param_state_class("totally_unknown") is None
