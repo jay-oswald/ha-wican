@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from http import HTTPStatus
+import logging
 from unittest.mock import AsyncMock, Mock, patch
 from yarl import URL
 
@@ -14,6 +15,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.const import CONF_WEBHOOK_ID
 from homeassistant.helpers import aiohttp_client
 
+from custom_components.wican import _async_register_webhook_on_device
 from custom_components.wican.const import CONF_POST_INTERVAL, DOMAIN
 
 from tests.conftest import MockConfigEntry
@@ -476,3 +478,201 @@ async def test_webhook_registration_invalid_url_generation(
     
     # No POST should be attempted due to URL generation failure
     assert not mock_session.post.called
+
+
+# --- Log levels for a registration that never succeeds -----------------------
+#
+# Registering is a best-effort refresh: the device stores the webhook URL itself
+# and keeps posting without it. So "could not reach the device" and "the device
+# refused" must not be reported the same way.
+
+
+async def _setup_without_registering(
+    hass: HomeAssistant,
+    entry: MockConfigEntry,
+) -> MockConfigEntry:
+    """Set the entry up with registration stubbed out, and return it.
+
+    Gives the entry a runtime_data to call the real registration against,
+    without the setup itself logging anything about registration first.
+    """
+    entry.add_to_hass(hass)
+
+    with patch(
+        "custom_components.wican._async_register_webhook_on_device",
+        return_value=True,
+    ):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+        # Fill webhook_url in while registration is still stubbed out. The call
+        # under test would otherwise backfill it, and the resulting entry update
+        # fires the update listener into a second, concurrent registration whose
+        # log records would land in the same caplog.
+        hass.config_entries.async_update_entry(
+            entry,
+            data={**entry.data, "webhook_url": "http://ha.local:8123/api/webhook/x"},
+        )
+        await hass.async_block_till_done()
+
+    return hass.config_entries.async_get_entry(entry.entry_id)
+
+
+def _entry_never_posted() -> MockConfigEntry:
+    """Return an entry for a device that has never posted to the webhook."""
+    return MockConfigEntry(
+        domain=DOMAIN,
+        title="WiCAN Test",
+        data={
+            CONF_WEBHOOK_ID: "test_webhook_id",
+            "host": "http://192.168.1.100",
+            # No fw_version: only the webhook handler writes it, so its absence
+            # is what says this device has never posted.
+        },
+        options={CONF_POST_INTERVAL: 10},
+    )
+
+
+async def test_unreachable_device_that_has_posted_is_not_an_error(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_session,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Test a device that is merely asleep or away does not log an error.
+
+    mock_config_entry carries fw_version, so it has posted to us before and is
+    already registered on the device side.
+    """
+    entry = await _setup_without_registering(hass, mock_config_entry)
+    assert entry.data["fw_version"]
+
+    mock_session.post.side_effect = ClientError("Cannot connect")
+
+    caplog.clear()
+    with (
+        caplog.at_level(logging.DEBUG, logger="custom_components.wican"),
+        patch(
+            "custom_components.wican.async_get_clientsession",
+            return_value=mock_session,
+        ),
+    ):
+        assert (
+            await _async_register_webhook_on_device(hass, entry, max_retries=1)
+            is False
+        )
+
+    assert mock_session.post.called
+    assert [r for r in caplog.records if r.levelno >= logging.ERROR] == []
+    assert "Could not reach" in caplog.text
+    assert "will resume posting" in caplog.text
+
+
+async def test_unreachable_device_that_never_posted_is_an_error(
+    hass: HomeAssistant,
+    mock_session,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Test a device that never completed setup still logs the checklist.
+
+    The manual config flow does not test connectivity, so this log line is the
+    only signal that setup never completed.
+    """
+    entry = await _setup_without_registering(hass, _entry_never_posted())
+    assert "fw_version" not in entry.data
+
+    mock_session.post.side_effect = ClientError("Cannot connect")
+
+    caplog.clear()
+    with (
+        caplog.at_level(logging.DEBUG, logger="custom_components.wican"),
+        patch(
+            "custom_components.wican.async_get_clientsession",
+            return_value=mock_session,
+        ),
+    ):
+        assert (
+            await _async_register_webhook_on_device(hass, entry, max_retries=1)
+            is False
+        )
+
+    errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert len(errors) == 1
+    message = errors[0].getMessage()
+    assert "has never posted" in message
+    assert "Device is powered on and connected to network" in message
+
+
+async def test_device_answering_with_an_error_status_is_an_error(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_session,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Test a device that answers and refuses is an error even if it has posted.
+
+    Something is actually wrong with the device, so the quiet "not reachable
+    right now" path must not swallow it just because fw_version is set.
+    """
+    entry = await _setup_without_registering(hass, mock_config_entry)
+    assert entry.data["fw_version"]
+
+    # Note: not create_mock_response(). The code awaits session.post() and then
+    # reads resp.status, so the response has to be the awaited value itself and
+    # status has to be a real int to compare against 300.
+    response = Mock()
+    response.status = HTTPStatus.INTERNAL_SERVER_ERROR
+    response.text = AsyncMock(return_value="nope")
+    mock_session.post.return_value = response
+
+    caplog.clear()
+    with (
+        caplog.at_level(logging.DEBUG, logger="custom_components.wican"),
+        patch(
+            "custom_components.wican.async_get_clientsession",
+            return_value=mock_session,
+        ),
+    ):
+        assert (
+            await _async_register_webhook_on_device(hass, entry, max_retries=1)
+            is False
+        )
+
+    errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert len(errors) == 1
+    assert "answered with an error status" in errors[0].getMessage()
+    assert "Could not reach" not in caplog.text
+
+
+async def test_per_endpoint_connection_errors_are_logged_at_debug(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_session,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Test the per-candidate connection errors do not warn.
+
+    They fire once per endpoint candidate per attempt while a device is offline,
+    and say nothing the summary after the loop does not say better.
+    """
+    entry = await _setup_without_registering(hass, mock_config_entry)
+
+    mock_session.post.side_effect = ClientError("Cannot connect")
+
+    caplog.clear()
+    with (
+        caplog.at_level(logging.DEBUG, logger="custom_components.wican"),
+        patch(
+            "custom_components.wican.async_get_clientsession",
+            return_value=mock_session,
+        ),
+    ):
+        await _async_register_webhook_on_device(hass, entry, max_retries=1)
+
+    connection_errors = [
+        r
+        for r in caplog.records
+        if "registration connection error" in r.getMessage()
+    ]
+    assert connection_errors
+    assert {r.levelno for r in connection_errors} == {logging.DEBUG}
