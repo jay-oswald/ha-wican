@@ -13,6 +13,7 @@ from homeassistant.helpers import entity_registry as er
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.wican.const import DOMAIN
+from custom_components.wican.device_tracker import WiCANDeviceTrackerEntity
 
 
 @pytest.fixture
@@ -387,3 +388,13 @@ async def test_device_tracker_gps_parse_error_logging(
     entity_id = "device_tracker.wican_device_location"
     state = hass.states.get(entity_id)
     assert state.state == STATE_UNAVAILABLE
+
+
+def test_device_tracker_does_not_override_location_name():
+    """Test the entity leaves location_name to TrackerEntity.
+
+    Home Assistant deprecated overriding location_name on a TrackerEntity and
+    drops support in 2027.7; it logs a warning at import for any subclass that
+    defines it. The state comes from latitude/longitude zone matching instead.
+    """
+    assert "location_name" not in WiCANDeviceTrackerEntity.__dict__

@@ -72,7 +72,6 @@ class WiCANDeviceTrackerEntity(CoordinatorEntity, TrackerEntity, RestoreEntity):
         self._attr_latitude: float | None = None
         self._attr_longitude: float | None = None
         self._attr_location_accuracy: int = 0
-        self._attr_location_name: str | None = None
 
         # Additional attributes
         self._altitude: float | None = None
@@ -125,11 +124,6 @@ class WiCANDeviceTrackerEntity(CoordinatorEntity, TrackerEntity, RestoreEntity):
     def location_accuracy(self) -> int:
         """Return the location accuracy in meters."""
         return self._attr_location_accuracy
-
-    @property
-    def location_name(self) -> str | None:
-        """Return the name of the current location (zone name if in zone)."""
-        return self._attr_location_name
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
