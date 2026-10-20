@@ -122,3 +122,18 @@ def mock_aiohttp_session() -> Generator[MagicMock]:
         patch("custom_components.wican.github_releases.async_get_clientsession", return_value=session),
     ):
         yield mock_session
+
+
+#: The device_id the stand-in WiCAN reports.
+TEST_DEVICE_ID = "a0b1c2d3e4f5"
+
+
+@pytest.fixture
+def device_answers(aioclient_mock):
+    """Make a WiCAN answer its status endpoint, /check_status, at the given base URLs."""
+
+    def answer(*bases: str, device_id: str = TEST_DEVICE_ID) -> None:
+        for base in bases:
+            aioclient_mock.get(f"{base.rstrip('/')}/check_status", json={"device_id": device_id})
+
+    return answer
