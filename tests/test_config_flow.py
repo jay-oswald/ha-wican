@@ -14,14 +14,18 @@ from homeassistant.const import CONF_NAME, CONF_WEBHOOK_ID
 
 from custom_components.wican.const import DOMAIN
 
+from .conftest import TEST_DEVICE_ID
+
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 
 async def test_user_flow_success(
     hass: HomeAssistant,
     mock_aiohttp_session,
+    device_answers,
 ) -> None:
-    """Test user config flow completes successfully."""
+    """Test user config flow completes successfully, keyed on the device's device_id."""
+    device_answers("http://wican_test.local:80")
     result = await hass.config_entries.flow.async_init(
         DOMAIN,
         context={"source": config_entries.SOURCE_USER},
@@ -38,6 +42,8 @@ async def test_user_flow_success(
     assert result2["type"] == FlowResultType.CREATE_ENTRY
     assert result2["title"] == "http://wican_test.local:80"
     assert result2["data"]["mdns"] == "http://wican_test.local:80"
+    assert result2["data"]["device_id"] == TEST_DEVICE_ID
+    assert result2["result"].unique_id == TEST_DEVICE_ID
     assert CONF_WEBHOOK_ID in result2["data"]
     assert result2["data"]["webhook_url"].endswith(result2["data"][CONF_WEBHOOK_ID])
     assert result2["description_placeholders"]["webhook_url"] == result2["data"]["webhook_url"]
@@ -46,29 +52,32 @@ async def test_user_flow_success(
 async def test_user_flow_cannot_connect(
     hass: HomeAssistant,
     mock_aiohttp_session,
+    aioclient_mock,
 ) -> None:
-    """Test user flow when device cannot be reached."""
+    """A device that does not answer is not added: the form says so instead."""
+    aioclient_mock.get("http://wican_nonexistent.local:80/check_status", exc=TimeoutError())
     result = await hass.config_entries.flow.async_init(
         DOMAIN,
         context={"source": config_entries.SOURCE_USER},
     )
 
-    # Config flow doesn't validate connectivity, it just creates the entry
-    # Validation happens during setup when webhook registration is attempted
     result2 = await hass.config_entries.flow.async_configure(
         result["flow_id"],
         {"mdns": "http://wican_nonexistent.local:80"},
     )
 
-    assert result2["type"] == FlowResultType.CREATE_ENTRY
-    assert result2["description_placeholders"]["webhook_url"] == result2["data"]["webhook_url"]
+    assert result2["type"] == FlowResultType.FORM
+    assert result2["errors"] == {"base": "cannot_connect"}
+    assert not hass.config_entries.async_entries(DOMAIN)
 
 
 async def test_user_flow_adds_http_scheme(
     hass: HomeAssistant,
     mock_aiohttp_session,
+    device_answers,
 ) -> None:
     """Test that config flow adds http:// if missing."""
+    device_answers("http://wican_test.local")
     result = await hass.config_entries.flow.async_init(
         DOMAIN,
         context={"source": config_entries.SOURCE_USER},
@@ -161,7 +170,7 @@ async def test_zeroconf_flow_not_wican(
 async def test_zeroconf_already_configured(
     hass: HomeAssistant,
 ) -> None:
-    """Test zeroconf aborts if device already configured (MAC-based unique_id)."""
+    """Zeroconf recognises an entry keyed on the MAC, and re-keys it on the device_id."""
     # Create a config entry with MAC-based unique_id
     existing_entry = MockConfigEntry(
         domain=DOMAIN,
@@ -195,6 +204,8 @@ async def test_zeroconf_already_configured(
 
     assert result["type"] == FlowResultType.ABORT
     assert result["reason"] == "already_configured"
+    # The entry an older discovery keyed on the MAC now carries the device_id.
+    assert existing_entry.unique_id == "test_device_123"
 
 
 async def test_zeroconf_during_onboarding(
@@ -335,8 +346,11 @@ async def test_zeroconf_flow_legacy_firmware(
 
 async def test_config_flow_user_manual_entry_with_optional_host(
     hass: HomeAssistant,
+    mock_aiohttp_session,
+    device_answers,
 ) -> None:
     """Test manual config entry with optional host field."""
+    device_answers("http://192.168.1.50")
     result = await hass.config_entries.flow.async_init(
         DOMAIN,
         context={"source": config_entries.SOURCE_USER},

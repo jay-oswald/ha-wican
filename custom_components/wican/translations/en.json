@@ -12,16 +12,28 @@
         "zeroconf_confirm": {
           "title": "Discovered WiCAN device",
           "description": "Do you want to add the WiCAN device **{name}** at `{url}` to Home Assistant?"
+        },
+        "reconfigure": {
+          "title": "Change the WiCAN's address",
+          "description": "Enter where Home Assistant now reaches this WiCAN. It must answer there as the same device.",
+          "data": {
+            "mdns": "Hostname or IP address",
+            "host": "Alternative IP (optional)"
+          }
         }
       },
       "abort": {
-        "cloud_not_connected": "[%key:common::config_flow::abort::cloud_not_connected%]",
-        "webhook_not_internet_accessible": "[%key:common::config_flow::abort::webhook_not_internet_accessible%]"
+        "cloud_not_connected": "Not connected to Home Assistant Cloud.",
+        "webhook_not_internet_accessible": "Your Home Assistant instance needs to be accessible from the internet to receive webhook messages.",
+        "already_configured": "Device is already configured",
+        "reconfigure_successful": "Reconfiguration was successful",
+        "wrong_device": "A different WiCAN answers at this address. Add it as a new device instead."
       },
       "create_entry": {
         "default": "To send events to Home Assistant, you will need to set up a webhook.\n\nOpen WiCAN and go to *Settings → Services → Automation → Webhooks*\n\nEnable *Webhooks* and fill in the following webhook in the URL field:\n\n`{webhook_url}`\n\nSee [the documentation]({docs_url}) for further details."
       },
       "error": {
+        "cannot_connect": "No WiCAN answered at this address. Check that it is awake (it sleeps when the engine is off) and on the network.",
         "connection_error": "Failed to connect to device: {error}",
         "wican_error": "WiCAN error: {error}",
         "device_mismatch": "Device ID mismatch. Expected {expected}, got {actual}. The device may have been replaced or the configuration is pointing to a different device. Please delete and reconfigure this integration.",

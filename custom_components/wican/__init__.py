@@ -15,6 +15,7 @@ from aiohttp.web import Request, Response
 from homeassistant.components import webhook
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_WEBHOOK_ID, EVENT_HOMEASSISTANT_STARTED, Platform
+from homeassistant.core import callback
 from homeassistant.exceptions import ConfigEntryError
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.dispatcher import async_dispatcher_send
@@ -42,6 +43,9 @@ if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
 
 _LOGGER = logging.getLogger(__name__)
+
+# Where Home Assistant reaches the device: the entry's, never overwritten by what the device reports.
+_CONNECTION_FIELDS = frozenset({"mdns", "host"})
 
 PLATFORMS: list[Platform] = [
     Platform.SENSOR,
@@ -283,6 +287,12 @@ async def async_setup_entry(  # noqa: C901, PLR0915
         for key in ("fw_version", "hw_version", "device_id", "git_version", "mdns", "host", "ip"):
             # Check top-level first, then status
             if key in status:
+                # Where Home Assistant reaches the device (mdns, host) is the
+                # entry's: set at setup or by a reconfigure, and only filled in
+                # from what the device reports when the entry has none. Taken
+                # from every webhook, it undid each reconfigure within seconds.
+                if key in _CONNECTION_FIELDS and entry.data.get(key):
+                    continue
                 device_info_fields[key] = status[key]
 
         # Capture device IP from the inbound request as an authoritative source
@@ -317,6 +327,7 @@ async def async_setup_entry(  # noqa: C901, PLR0915
 
             if data_changed:
                 hass.config_entries.async_update_entry(entry, data=new_data)
+                _async_adopt_device_identity(hass, entry)
                 if connection_field_changed:
                     entry.runtime_data.device_host = new_data.get("host") or entry.runtime_data.device_host
                     entry.runtime_data.device_ip = new_data.get("ip") or entry.runtime_data.device_ip
@@ -351,6 +362,7 @@ async def async_setup_entry(  # noqa: C901, PLR0915
     # Normalize host/mdns schemes BEFORE scheduling registration
     # to avoid triggering update listener which would cause duplicate registrations
     _normalize_connection_urls(hass, entry)
+    _async_adopt_device_identity(hass, entry)
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
@@ -367,6 +379,39 @@ async def async_unload_entry(
     """Unload a config entry."""
     webhook.async_unregister(hass, entry.runtime_data.webhook_id)
     return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+
+
+@callback
+def _async_adopt_device_identity(hass: HomeAssistant, entry: WiCANConfigEntry) -> None:
+    """Key the entry on the device_id the device reports, once it is known.
+
+    Manual setup, discovery and the webhook all know the device_id, so it is
+    the one identity every path agrees on. An entry made before that (by an
+    older manual setup, with no identity, or by discovery, keyed on the
+    station MAC) takes it here, so the device is never added a second time and
+    the entry can be reconfigured. An entry whose device_id another entry
+    already carries is a duplicate of it, and is named rather than merged.
+    """
+    device_id = entry.data.get("device_id")
+    if not device_id or entry.unique_id == device_id:
+        return
+    holder = next(
+        (
+            other
+            for other in hass.config_entries.async_entries(DOMAIN)
+            if other.entry_id != entry.entry_id and other.unique_id == device_id
+        ),
+        None,
+    )
+    if holder is not None:
+        _LOGGER.warning(
+            "WiCAN entry %s reports device %s, which entry %s already is: remove the duplicate",
+            entry.title,
+            device_id,
+            holder.title,
+        )
+        return
+    hass.config_entries.async_update_entry(entry, unique_id=device_id)
 
 
 def _normalize_connection_urls(hass: HomeAssistant, entry: WiCANConfigEntry) -> None:
