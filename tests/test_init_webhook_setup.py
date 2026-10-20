@@ -138,7 +138,7 @@ async def test_webhook_registration_normalizes_host_scheme(hass: HomeAssistant) 
     assert entry.data["host"] == "http://192.168.1.100"
 
 
-async def test_webhook_registration_derives_host_from_ip(hass: HomeAssistant) -> None:
+async def test_webhook_registration_derives_host_from_ip(hass: HomeAssistant, mock_aiohttp_session) -> None:
     """Test webhook registration derives host from IP when host is missing."""
     entry = MockConfigEntry(
         domain=DOMAIN,
@@ -155,7 +155,7 @@ async def test_webhook_registration_derives_host_from_ip(hass: HomeAssistant) ->
     assert entry.runtime_data.device_host == "http://192.168.1.50"
 
 
-async def test_webhook_registration_caches_successful_ip(hass: HomeAssistant) -> None:
+async def test_webhook_registration_caches_successful_ip(hass: HomeAssistant, mock_aiohttp_session) -> None:
     """Test that successful webhook registration caches the resolved IP."""
     # This test requires mocking the actual webhook POST success which is complex
     # The IP caching logic (lines 396-423) is tested in integration tests
