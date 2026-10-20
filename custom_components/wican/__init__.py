@@ -44,6 +44,9 @@ if TYPE_CHECKING:
 
 _LOGGER = logging.getLogger(__name__)
 
+# Where Home Assistant reaches the device: the entry's, never overwritten by what the device reports.
+_CONNECTION_FIELDS = frozenset({"mdns", "host"})
+
 PLATFORMS: list[Platform] = [
     Platform.SENSOR,
     Platform.BINARY_SENSOR,
@@ -284,6 +287,12 @@ async def async_setup_entry(  # noqa: C901, PLR0915
         for key in ("fw_version", "hw_version", "device_id", "git_version", "mdns", "host", "ip"):
             # Check top-level first, then status
             if key in status:
+                # Where Home Assistant reaches the device (mdns, host) is the
+                # entry's: set at setup or by a reconfigure, and only filled in
+                # from what the device reports when the entry has none. Taken
+                # from every webhook, it undid each reconfigure within seconds.
+                if key in _CONNECTION_FIELDS and entry.data.get(key):
+                    continue
                 device_info_fields[key] = status[key]
 
         # Capture device IP from the inbound request as an authoritative source

@@ -215,3 +215,47 @@ async def test_the_first_webhook_gives_the_entry_its_identity(
 
     assert response.status < 300
     assert entry.unique_id == mock_webhook_data["status"]["device_id"]
+
+
+async def test_a_webhook_does_not_overwrite_where_the_device_is_reached(
+    hass: HomeAssistant,
+    mock_aiohttp_session,
+    mock_webhook_data,
+    hass_client_no_auth,
+) -> None:
+    """The address set at setup or by a reconfigure stays: the device's own mDNS name does not replace it."""
+    entry = _entry(hass, unique_id=None, host="http://192.0.2.31")
+    await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    payload = {**mock_webhook_data, "status": {**mock_webhook_data["status"], "mdns": "wican_a0b1c2d3e4f5.local"}}
+
+    client = await hass_client_no_auth()
+    await client.post(f"/api/webhook/{entry.data[CONF_WEBHOOK_ID]}", json=payload)
+    await hass.async_block_till_done()
+
+    assert entry.data["mdns"] == "http://wican_old.local"
+    assert entry.data[CONF_HOST] == "http://192.0.2.31"
+
+
+async def test_a_webhook_fills_in_an_address_the_entry_lacks(
+    hass: HomeAssistant,
+    mock_aiohttp_session,
+    mock_webhook_data,
+    hass_client_no_auth,
+) -> None:
+    """An entry with no name for the device learns the one the device reports."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="WiCAN",
+        data={CONF_WEBHOOK_ID: uuid4().hex, CONF_HOST: "http://192.0.2.31"},
+    )
+    entry.add_to_hass(hass)
+    await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    payload = {**mock_webhook_data, "status": {**mock_webhook_data["status"], "mdns": "wican_a0b1c2d3e4f5.local"}}
+
+    client = await hass_client_no_auth()
+    await client.post(f"/api/webhook/{entry.data[CONF_WEBHOOK_ID]}", json=payload)
+    await hass.async_block_till_done()
+
+    assert entry.data["mdns"] == "wican_a0b1c2d3e4f5.local"
