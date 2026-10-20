@@ -105,14 +105,20 @@ async def init_integration(
 
 @pytest.fixture
 def mock_aiohttp_session() -> Generator[MagicMock]:
-    """Mock aiohttp session."""
-    with patch(
-        "homeassistant.helpers.aiohttp_client.async_get_clientsession"
-    ) as mock_session:
-        session = MagicMock()
-        mock_response = MagicMock()
-        mock_response.status = 200
-        mock_response.json = AsyncMock(return_value={"status": "ok"})
-        session.post = AsyncMock(return_value=mock_response)
-        mock_session.return_value = session
+    """Mock aiohttp session.
+
+    Patched where each module looks the name up: the integration imports
+    ``async_get_clientsession`` into its own namespace, so patching it on
+    ``homeassistant.helpers.aiohttp_client`` alone left the real session in
+    place and the tests reached the network.
+    """
+    session = MagicMock()
+    mock_response = MagicMock()
+    mock_response.status = 200
+    mock_response.json = AsyncMock(return_value={"status": "ok"})
+    session.post = AsyncMock(return_value=mock_response)
+    with (
+        patch("custom_components.wican.async_get_clientsession", return_value=session) as mock_session,
+        patch("custom_components.wican.github_releases.async_get_clientsession", return_value=session),
+    ):
         yield mock_session

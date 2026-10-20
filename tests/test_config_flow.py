@@ -335,6 +335,7 @@ async def test_zeroconf_flow_legacy_firmware(
 
 async def test_config_flow_user_manual_entry_with_optional_host(
     hass: HomeAssistant,
+    mock_aiohttp_session,
 ) -> None:
     """Test manual config entry with optional host field."""
     result = await hass.config_entries.flow.async_init(
