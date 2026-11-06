@@ -256,6 +256,16 @@ class WiCANSensorEntity(WiCANEntity, RestoreSensor):
         self._attr_native_value = None
         self._attr_extra_state_attributes = None
 
+    def _coerce_for_state_class(self, value):
+        """Drop non-numeric values when the sensor carries a numeric state_class."""
+        if (
+            self.entity_description.state_class is not None
+            and value is not None
+            and (isinstance(value, bool) or not isinstance(value, (int, float)))
+        ):
+            return None
+        return value
+
     def _handle_coordinator_update(self) -> None:
         """Handle updated data from the coordinator."""
         key = self.entity_description.key
@@ -266,7 +276,9 @@ class WiCANSensorEntity(WiCANEntity, RestoreSensor):
 
         # Get raw value and normalize it
         raw_value = status[key]
-        normalized_value = self.coordinator.normalize_sensor_value(key, raw_value)
+        normalized_value = self._coerce_for_state_class(
+            self.coordinator.normalize_sensor_value(key, raw_value),
+        )
 
         # Update entity state
         self._attr_native_value = normalized_value
@@ -292,8 +304,10 @@ class WiCANSensorEntity(WiCANEntity, RestoreSensor):
         state = await self.async_get_last_sensor_data()
         if state and state.native_value is not None:
             # Normalize restored value using coordinator logic
-            self._attr_native_value = self.coordinator.normalize_sensor_value(
-                self.entity_description.key, state.native_value,
+            self._attr_native_value = self._coerce_for_state_class(
+                self.coordinator.normalize_sensor_value(
+                    self.entity_description.key, state.native_value,
+                ),
             )
 
         await super().async_added_to_hass()
