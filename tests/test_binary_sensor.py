@@ -10,6 +10,10 @@ from homeassistant.const import CONF_WEBHOOK_ID, STATE_ON, STATE_OFF
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
 
+from custom_components.wican.binary_sensor import (
+    DYNAMIC_PID_BINARY_SENSORS,
+    pid_value_to_is_on,
+)
 from custom_components.wican.const import DOMAIN
 
 from pytest_homeassistant_custom_component.common import MockConfigEntry
@@ -249,3 +253,190 @@ async def test_binary_sensor_none_checks(hass: HomeAssistant, hass_client) -> No
     # Verify entities exist and didn't crash
     state = hass.states.get("binary_sensor.wican_test_ble_status")
     assert state is not None
+
+
+async def test_profile_binary_pids_become_binary_sensors(
+    hass: HomeAssistant,
+    init_integration: MockConfigEntry,
+    mock_webhook_data: dict,
+    hass_client,
+) -> None:
+    """PIDs marked binary in params.json get a binary_sensor, not a sensor.
+
+    CHARGING and CHARGER_CONNECTED report the strings "on" and "off", which
+    as sensor states cannot drive a state condition or a device trigger.
+    """
+    entry = init_integration
+    webhook_id = entry.data[CONF_WEBHOOK_ID]
+
+    data = dict(mock_webhook_data)
+    data["autopid_data"] = {
+        "CHARGING": "on",
+        "CHARGER_CONNECTED": "off",
+        "SOC": 62,
+    }
+    data["config"] = {
+        "CHARGING": {"unit": "", "class": "battery_charging"},
+        "CHARGER_CONNECTED": {"unit": "", "class": "plug"},
+        "SOC": {"unit": "%", "class": "battery"},
+    }
+
+    client = await hass_client()
+    await client.post(f"/api/webhook/{webhook_id}", json=data)
+    await hass.async_block_till_done()
+
+    charging = hass.states.get("binary_sensor.wican_device_charging")
+    assert charging is not None
+    assert charging.state == STATE_ON
+    assert charging.attributes.get("device_class") == "battery_charging"
+
+    plugged = hass.states.get("binary_sensor.wican_device_charger_connected")
+    assert plugged is not None
+    assert plugged.state == STATE_OFF
+    assert plugged.attributes.get("device_class") == "plug"
+
+    # The same PIDs must not also appear on the sensor platform
+    assert hass.states.get("sensor.wican_device_charging") is None
+    assert hass.states.get("sensor.wican_device_charger_connected") is None
+
+    # Non-binary PIDs are untouched
+    assert hass.states.get("sensor.wican_device_soc") is not None
+
+
+async def test_binary_pids_restored_from_config_entry(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+) -> None:
+    """Binary PIDs stored on the entry are recreated on the right platform."""
+    entry_data = dict(mock_config_entry.data)
+    entry_data["pid_keys"] = ["CHARGING", "PARK_BRAKE", "SOC"]
+    entry_data["config"] = {
+        "CHARGING": {"unit": "", "class": "battery_charging"},
+        "PARK_BRAKE": {"unit": "none", "class": "none"},
+        "SOC": {"unit": "%", "class": "battery"},
+    }
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="WiCAN Device",
+        data=entry_data,
+        options=mock_config_entry.options,
+        unique_id=mock_config_entry.unique_id,
+    )
+    entry.add_to_hass(hass)
+
+    with patch("custom_components.wican.async_get_clientsession"), patch(
+        "custom_components.wican.WiCANDataUpdateCoordinator.async_config_entry_first_refresh",
+    ):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+    entity_registry = er.async_get(hass)
+    assert entity_registry.async_get("binary_sensor.wican_device_charging") is not None
+    assert entity_registry.async_get("binary_sensor.wican_device_park_brake") is not None
+    assert entity_registry.async_get("sensor.wican_device_soc") is not None
+    assert entity_registry.async_get("sensor.wican_device_charging") is None
+
+
+async def test_binary_pid_map_cleared_on_unload(
+    hass: HomeAssistant,
+    init_integration: MockConfigEntry,
+    mock_webhook_data: dict,
+    hass_client,
+) -> None:
+    """The dynamic binary sensor map does not outlive the config entry."""
+    entry = init_integration
+
+    data = dict(mock_webhook_data)
+    data["autopid_data"] = {"CHARGING": "on"}
+    data["config"] = {"CHARGING": {"unit": "", "class": "battery_charging"}}
+
+    client = await hass_client()
+    await client.post(f"/api/webhook/{entry.data[CONF_WEBHOOK_ID]}", json=data)
+    await hass.async_block_till_done()
+
+    assert "CHARGING" in DYNAMIC_PID_BINARY_SENSORS[entry.entry_id]
+
+    assert await hass.config_entries.async_unload(entry.entry_id)
+    await hass.async_block_till_done()
+
+    assert entry.entry_id not in DYNAMIC_PID_BINARY_SENSORS
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("on", True),
+        ("ON", True),
+        (" on ", True),
+        ("off", False),
+        ("OFF", False),
+        ("true", True),
+        ("false", False),
+        ("enable", True),
+        ("disable", False),
+        (1, True),
+        (0, False),
+        ("1", True),
+        ("0", False),
+        (1.0, True),
+        (0.0, False),
+        (True, True),
+        (False, False),
+        (None, None),
+        ("wat", None),
+        ("", None),
+    ],
+)
+def test_pid_value_to_is_on(value, expected) -> None:
+    """"off" must read as off - bool("off") is True."""
+    assert pid_value_to_is_on(value) is expected
+
+
+async def test_pid_config_persisted_when_value_arrives_in_later_post(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+) -> None:
+    """Firmware sends config only on Post 1; PIDs arriving on Post 2 use stored config."""
+    from homeassistant.helpers.dispatcher import async_dispatcher_send
+
+    mock_config_entry.add_to_hass(hass)
+    with patch("custom_components.wican.async_get_clientsession"), patch(
+        "custom_components.wican.WiCANDataUpdateCoordinator.async_config_entry_first_refresh",
+    ):
+        assert await hass.config_entries.async_setup(mock_config_entry.entry_id)
+        await hass.async_block_till_done()
+
+    coordinator = mock_config_entry.runtime_data.coordinator
+    webhook_id = mock_config_entry.runtime_data.webhook_id
+
+    # Post 1 includes config for SOC, custom_volt, and CHARGING, but only SOC value
+    post1 = {
+        "autopid_data": {"SOC": 62},
+        "config": {
+            "SOC": {"unit": "%", "class": "battery"},
+            "custom_volt": {"unit": "V", "class": "voltage"},
+            "CHARGING": {"unit": "", "class": "battery_charging"},
+        },
+    }
+    coordinator.handle_webhook_data(post1)
+    async_dispatcher_send(hass, DOMAIN, webhook_id, post1)
+    await hass.async_block_till_done()
+
+    # Post 2 includes custom_volt and CHARGING in autopid_data without a config block
+    post2 = {
+        "autopid_data": {"SOC": 62, "custom_volt": 13.8, "CHARGING": "on"},
+    }
+    coordinator.handle_webhook_data(post2)
+    async_dispatcher_send(hass, DOMAIN, webhook_id, post2)
+    await hass.async_block_till_done()
+
+    custom_state = hass.states.get("sensor.wican_device_custom_volt")
+    assert custom_state is not None
+    assert custom_state.attributes.get("unit_of_measurement") == "V"
+    assert custom_state.attributes.get("device_class") == "voltage"
+
+    charging_state = hass.states.get("binary_sensor.wican_device_charging")
+    assert charging_state is not None
+    assert charging_state.state == STATE_ON
+    assert charging_state.attributes.get("device_class") == "battery_charging"
+

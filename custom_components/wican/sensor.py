@@ -19,6 +19,7 @@ from .param_loader import (
     get_param_device_class,
     get_param_icon,
     get_param_unit,
+    is_binary_sensor,
     is_valid_class_unit_combo,
     is_valid_device_class,
 )
@@ -140,7 +141,7 @@ def _normalize_device_class(
 DYNAMIC_PID_SENSORS = {}
 
 
-async def async_setup_entry(  # noqa: C901
+async def async_setup_entry(  # noqa: C901, PLR0915
     hass: HomeAssistant,
     config_entry: WiCANConfigEntry,
     async_add_entities: AddEntitiesCallback,
@@ -159,6 +160,9 @@ async def async_setup_entry(  # noqa: C901
     pid_config = config_entry.data.get("config", {})
     restored_entities = []
     for pid_key in pid_keys:
+        if is_binary_sensor(pid_key):
+            # Owned by the binary_sensor platform.
+            continue
         config = pid_config.get(pid_key, {})
         # Use _get_pid_unit with config unit for consistent fallback handling
         unit = _get_pid_unit(pid_key, config.get("unit"))
@@ -186,16 +190,28 @@ async def async_setup_entry(  # noqa: C901
 
     async def _async_process_pid_update(data):
         pid_data = data.get("autopid_data", {})
-        if not pid_data:
+        pid_config = data.get("config", {})
+        if not pid_data and not pid_config:
             return
 
-        pid_config = data.get("config", {})
+        existing_config = dict(config_entry.data.get("config", {}))
+        updated_config = dict(existing_config)
+        # Firmware sends "config" only once per boot (on the first webhook post),
+        # so persist every PID config entry even if that PID's first value arrives
+        # on a later post.
+        for pid_key, cfg in pid_config.items():
+            if isinstance(cfg, dict):
+                updated_config[pid_key] = cfg
+
         new_entities = []
         sensors = DYNAMIC_PID_SENSORS[config_entry.entry_id]
 
         for pid_key in pid_data:
+            if is_binary_sensor(pid_key):
+                # Owned by the binary_sensor platform.
+                continue
             if pid_key not in sensors:
-                config = pid_config.get(pid_key, {})
+                config = pid_config.get(pid_key) or updated_config.get(pid_key, {})
                 # Use _get_pid_unit with config unit for consistent fallback handling
                 unit = _get_pid_unit(pid_key, config.get("unit"))
                 device_class = _normalize_device_class(config.get("class"), unit, pid_key)
@@ -217,27 +233,29 @@ async def async_setup_entry(  # noqa: C901
                 new_entities.append(entity)
                 sensors[pid_key] = entity
 
-        if new_entities:
-            pid_keys = set(sensors.keys())
-            existing_config = dict(config_entry.data.get("config", {}))
-            for pid_key in pid_data:
-                if pid_key in pid_config:
-                    existing_config[pid_key] = pid_config[pid_key]
+        # Persist every PID seen, including the ones the binary_sensor platform
+        # owns, so both platforms can restore their entities on restart.
+        known_keys = set(config_entry.data.get("pid_keys", []))
+        all_keys = known_keys | set(pid_data)
+
+        # Only write when something actually changed - updating the entry
+        # fires the update listener, which re-registers the webhook.
+        if all_keys != known_keys or updated_config != existing_config:
             new_data = dict(config_entry.data)
-            new_data["pid_keys"] = list(pid_keys)
-            new_data["config"] = existing_config
+            new_data["pid_keys"] = list(all_keys)
+            new_data["config"] = updated_config
             hass.config_entries.async_update_entry(config_entry, data=new_data)
+
+        if new_entities:
             async_add_entities(new_entities)
 
+    @callback
     def handle_pid_update(webhook_id, data):
         # IMPORTANT: multiple WiCAN entries share the same dispatcher signal.
         # Filter by this entry's webhook_id to avoid cross-device entity creation.
         if webhook_id != config_entry.runtime_data.webhook_id:
             return
-        hass.loop.call_soon_threadsafe(
-            hass.async_create_task,
-            _async_process_pid_update(data),
-        )
+        hass.async_create_task(_async_process_pid_update(data))
 
     # Connect the dispatcher signal to handle_pid_update
     unsub = async_dispatcher_connect(hass, DOMAIN, handle_pid_update)
