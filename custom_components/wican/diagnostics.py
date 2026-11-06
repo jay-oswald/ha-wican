@@ -23,22 +23,32 @@ ATTRIBUTES_TO_REDACT = {"latitude", "longitude"}
 
 
 def _history_sync_diagnostics(config_entry: MeatPiConfigEntry) -> dict[str, Any] | None:
-    """Summarize the last history-backfill run for diagnostics."""
-    result = config_entry.runtime_data.last_history_result
+    """Summarize the last history catch-up run for diagnostics."""
+    runtime = config_entry.runtime_data
+    result = runtime.last_history_result
     if result is None:
         return None
     return {
         "ran": result.ran,
         "source": result.source,
+        "pages": result.pages,
         "rows_fetched": result.rows_fetched,
         "rows_used": result.rows_used,
         "rows_rejected": result.rows_rejected,
+        "rows_deferred": result.rows_deferred,
         "hours_imported": result.hours_imported,
         "hours_skipped_existing": result.hours_skipped_existing,
+        "hours_overwritten_live": result.hours_overwritten_live,
         "pids_imported": result.pids_imported,
         "pids_skipped": result.pids_skipped,
         "errors": list(result.errors),
         "watermark": result.watermark,
+        "cursor": result.cursor,
+        "more_pending": result.more_pending,
+        "followup_in": result.followup_in,
+        "followup_due": runtime.history_followup_due,
+        "finished_at": result.finished_at,
+        "device": result.device,
     }
 
 

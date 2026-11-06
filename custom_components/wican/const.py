@@ -60,6 +60,13 @@ PROBE_RETRY_INTERVAL = 300  # seconds
 # See notes/HISTORICAL_DATA_SYNC.md for the design.
 CONF_HISTORY_SYNC = "history_sync"
 DEFAULT_HISTORY_SYNC = True
+# Hours the device recorded replace the live statistics of the same hour by
+# default (the log is the complete record; the live pushes are samples of
+# it, and the drive's last hour would otherwise keep only the minutes after
+# the car got home). True = the old rule: an hour Home Assistant already
+# has is never touched.
+CONF_HISTORY_PREFER_LIVE = "history_prefer_live"
+DEFAULT_HISTORY_PREFER_LIVE = False
 COMPONENT_DATA_LOGGER = "data_logger"
 LOGGER_STATUS_PATH = "/api/logger"
 LOGGER_EXPORT_PATH = "/api/logger/export"
@@ -74,9 +81,45 @@ HISTORY_MAX_ROWS_PER_SYNC = 200_000
 HISTORY_MAX_FILE_BYTES = 8 * 1024 * 1024
 HISTORY_MAX_FILES_PER_SYNC = 48
 HISTORY_MAX_PIDS_PER_SYNC = 200
-HISTORY_EXPORT_PAGE_ROWS = 2000  # rows requested per export page
+HISTORY_EXPORT_PAGE_ROWS = 2000  # rows requested per export page (the firmware's cap)
 HISTORY_EXPORT_MAX_PAGES = 200
 HISTORY_EXPORT_PAGE_BYTES = 2 * 1024 * 1024  # size cap per export page
+# The firmware stamps its rows in epoch milliseconds (issue #984); a stamp
+# past this is read as milliseconds, anything below as seconds.
+HISTORY_TS_MS_THRESHOLD = 100_000_000_000
+# Follow-up runs: rows of the hour still running are imported this many
+# seconds past the top of the next hour (the device's last batch of the
+# hour lands up to its flush interval later); a device with more than one
+# run could take is read again after this delay, at most this many times
+# in a row.
+HISTORY_FOLLOWUP_HOUR_MARGIN = 90
+HISTORY_FOLLOWUP_MORE_DELAY = 60
+HISTORY_MAX_FOLLOWUPS = 20
+
+# The GPS track (2026-11-06): the device serves the recorded fix as a GPX
+# document (GET /api/logger/gpx); the save_gpx service writes it under
+# <config>/www/wican/ so it can be fetched as /local/wican/<file>.
+LOGGER_GPX_PATH = "/api/logger/gpx"
+# the device's clock journal (firmware issue #984): every set or step of its
+# clock with the log files that were open; rows written before a step carry
+# the old clock and are re-based with it (bounded on the device to ~96 KB)
+CLOCK_JOURNAL_PATH = "/sd/logs/clock.jsonl"
+# the GPS track card (a Lovelace custom card shipped with the integration,
+# served from custom_components/wican/www and registered as a frontend
+# resource at setup, so no manual resource entry is needed)
+FRONTEND_STATIC_URL = "/wican-static"
+GPX_CARD_FILE = "wican-gpx-card.js"
+DATA_FRONTEND_REGISTERED = "wican_frontend_registered"
+CLOCK_JOURNAL_MAX_BYTES = 256 * 1024
+CLOCK_JOURNAL_BOOT_SLACK_MS = 5000
+GPX_PAGE_BYTES = 4 * 1024 * 1024
+GPX_PAGE_POINTS = 4000
+GPX_MAX_PAGES = 10
+GPX_DIR = "wican"
+SERVICE_SAVE_GPX = "save_gpx"
+ATTR_HOURS = "hours"
+DEFAULT_GPX_HOURS = 24
+MAX_GPX_HOURS = 24 * 30
 HISTORY_SYNC_MIN_INTERVAL = 300  # seconds between sync runs per entry
 
 # Remote device catalog: declarative device-type definitions pulled from

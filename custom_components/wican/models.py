@@ -9,6 +9,8 @@ from .api import LEGACY_CAPABILITIES, DeviceCapabilities
 from .devices import DEVICE_PROFILES, DEVICE_TYPE_WICAN
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from .api import MeatPiApiClient
     from .coordinator import MeatPiDataUpdateCoordinator
     from .devices import MeatPiDeviceProfile
@@ -57,3 +59,9 @@ class MeatPiRuntimeData:
     history_sync_pending: bool = False
     last_history_sync: float = 0.0
     last_history_result: HistorySyncResult | None = None
+    # A follow-up run the last sync asked for (the hour still running, a
+    # device with more than one run could take): its cancel handle and
+    # how many ran in a row (bounded).
+    history_followup: Callable[[], None] | None = None
+    history_followups: int = 0
+    history_followup_due: float | None = None  # epoch seconds, diagnostics

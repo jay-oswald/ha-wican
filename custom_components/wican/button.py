@@ -71,6 +71,15 @@ REFRESH_DEFINITIONS_DESCRIPTION = ButtonEntityDescription(
     entity_category=EntityCategory.CONFIG,
 )
 
+# Store and forward (2026-11-06): pull the device's log now instead of
+# waiting for the next reconnect. Needs the data_logger component.
+CATCH_UP_HISTORY_DESCRIPTION = ButtonEntityDescription(
+    key="catch_up_history",
+    translation_key="catch_up_history",
+    entity_category=EntityCategory.CONFIG,
+)
+CATCH_UP_HISTORY_COMPONENT = "data_logger"
+
 
 async def async_setup_entry(
     hass: HomeAssistant,
@@ -101,7 +110,7 @@ async def async_setup_entry(
         capabilities = runtime.capabilities
         if not capabilities.has_http_api:
             return
-        new_entities: list[MeatPiButtonEntity] = []
+        new_entities: list[ButtonEntity] = []
         for description in BUTTON_DESCRIPTIONS:
             if description.key in added_keys:
                 continue
@@ -111,6 +120,14 @@ async def async_setup_entry(
                 continue
             new_entities.append(MeatPiButtonEntity(config_entry, description))
             added_keys.add(description.key)
+        if (
+            CATCH_UP_HISTORY_DESCRIPTION.key not in added_keys
+            and capabilities.has_component(CATCH_UP_HISTORY_COMPONENT)
+        ):
+            new_entities.append(
+                MeatPiCatchUpHistoryButton(config_entry, CATCH_UP_HISTORY_DESCRIPTION),
+            )
+            added_keys.add(CATCH_UP_HISTORY_DESCRIPTION.key)
         if new_entities:
             _LOGGER.debug(
                 "Adding %d control button(s) for %s",
@@ -175,6 +192,33 @@ class MeatPiRefreshDefinitionsButton(MeatPiEntity, ButtonEntity):
         self.hass.async_create_task(
             self.hass.config_entries.async_reload(self.config_entry.entry_id),
         )
+
+
+class MeatPiCatchUpHistoryButton(MeatPiEntity, ButtonEntity):
+    """Pull the device's SD-card log into long-term statistics now.
+
+    The catch-up normally runs by itself when the device reconnects after
+    being away (store and forward); this button runs it on request, the
+    rate limit aside, for a user who just turned the feature on or wants
+    the last drive in without waiting. The run itself is the same
+    coalesced, bounded sync; its outcome shows in the diagnostics.
+    """
+
+    __slots__ = ()
+
+    @callback
+    def _async_handle_event(self, webhook_id: str, data: dict[str, str]) -> None:
+        """Handle webhook event (this button carries no push state)."""
+
+    async def async_press(self) -> None:
+        """Start a catch-up run for this entry."""
+        from . import async_request_history_sync_now  # noqa: PLC0415, avoids an import cycle at module load
+
+        if not async_request_history_sync_now(self.hass, self.config_entry):
+            raise HomeAssistantError(
+                translation_domain=DOMAIN,
+                translation_key="api_not_available",
+            )
 
 
 class MeatPiButtonEntity(MeatPiEntity, ButtonEntity):

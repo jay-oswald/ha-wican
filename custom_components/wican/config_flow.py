@@ -16,8 +16,10 @@ from yarl import URL
 
 from .const import (
     CONF_DEVICE_TYPE,
+    CONF_HISTORY_PREFER_LIVE,
     CONF_HISTORY_SYNC,
     CONF_POST_INTERVAL,
+    DEFAULT_HISTORY_PREFER_LIVE,
     DEFAULT_HISTORY_SYNC,
     DEFAULT_POST_INTERVAL,
     DOMAIN,
@@ -412,6 +414,12 @@ class MeatPiOptionsFlow(config_entries.OptionsFlow):
                 vol.Required(
                     CONF_HISTORY_SYNC,
                     default=options.get(CONF_HISTORY_SYNC, DEFAULT_HISTORY_SYNC),
+                ): bool,
+                vol.Required(
+                    CONF_HISTORY_PREFER_LIVE,
+                    default=options.get(
+                        CONF_HISTORY_PREFER_LIVE, DEFAULT_HISTORY_PREFER_LIVE,
+                    ),
                 ): bool,
             },
         )

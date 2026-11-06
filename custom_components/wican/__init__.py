@@ -6,6 +6,7 @@ import asyncio
 from http import HTTPStatus
 import ipaddress
 import logging
+import os
 import re
 import time
 from typing import TYPE_CHECKING, Any
@@ -16,11 +17,19 @@ from aiohttp.web import Request, Response
 from homeassistant.components import webhook
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_WEBHOOK_ID, EVENT_HOMEASSISTANT_STARTED, Platform
-from homeassistant.core import callback
+from homeassistant.components.frontend import add_extra_js_url
+from aiohttp import web
+from homeassistant.components.http import HomeAssistantView
+from homeassistant.loader import async_get_integration
+from pathlib import Path
+from homeassistant.core import ServiceCall, ServiceResponse, SupportsResponse, callback
+from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers import config_validation as cv, device_registry as dr
 from homeassistant.exceptions import ConfigEntryError
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.dispatcher import async_dispatcher_send
+from homeassistant.helpers.event import async_call_later
 from homeassistant.util.json import json_loads
 import voluptuous as vol
 from yarl import URL
@@ -28,13 +37,24 @@ from yarl import URL
 from .api import DeviceCapabilities, MeatPiApiClient
 from .catalog import async_setup_catalog
 from .const import (
+    GPX_CARD_FILE,
+    FRONTEND_STATIC_URL,
+    DATA_FRONTEND_REGISTERED,
+    ATTR_HOURS,
     COMPONENT_DATA_LOGGER,
+    DEFAULT_GPX_HOURS,
+    GPX_DIR,
+    GPX_MAX_PAGES,
+    GPX_PAGE_POINTS,
+    MAX_GPX_HOURS,
+    SERVICE_SAVE_GPX,
     CONF_DEVICE_TYPE,
     CONF_HISTORY_SYNC,
     CONF_POST_INTERVAL,
     DEFAULT_HISTORY_SYNC,
     DEFAULT_POST_INTERVAL,
     DOMAIN,
+    HISTORY_MAX_FOLLOWUPS,
     HISTORY_SYNC_MIN_INTERVAL,
     IP_CACHE_DURATION,
     MAX_DEVICE_INFO_FIELD_LENGTH,
@@ -48,7 +68,7 @@ from .const import (
 )
 from .coordinator import MeatPiDataUpdateCoordinator
 from .devices import WICAN_FAMILY_TYPES, get_profile, infer_device_type
-from .exceptions import MeatPiWebhookError
+from .exceptions import MeatPiApiError, MeatPiWebhookError
 from .github_releases import GitHubReleasesCoordinator, hardware_stream
 from .helpers import resolve_device_webhook_urls
 from .history import async_remove_history_store, async_sync_history
@@ -646,6 +666,9 @@ async def async_setup_entry(  # noqa: C901, PLR0915
             _LOGGER.warning("Failed to generate webhook_id; setup may fail")
             return False
 
+    _async_setup_services(hass)
+    await _async_register_frontend(hass)
+
     # Load the device catalog (bundled/stored copy applies immediately, a
     # remote refresh runs in the background at most once per day) so
     # catalog-defined products resolve to their real profiles.
@@ -863,6 +886,7 @@ async def async_unload_entry(
     # to pushes.
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unload_ok:
+        _cancel_history_followup(entry.runtime_data)
         webhook.async_unregister(hass, entry.runtime_data.webhook_id)
         _clear_webhook_repair(hass, entry)
     return unload_ok
@@ -1085,7 +1109,7 @@ async def _async_probe_capabilities(
 
 
 def _schedule_history_sync(hass: HomeAssistant, entry: MeatPiConfigEntry) -> None:
-    """Schedule a history backfill run if enabled, capable, and not rate-limited."""
+    """Schedule a history catch-up run if enabled, capable, and not rate-limited."""
     runtime = getattr(entry, "runtime_data", None)
     if runtime is None:
         return
@@ -1098,20 +1122,87 @@ def _schedule_history_sync(hass: HomeAssistant, entry: MeatPiConfigEntry) -> Non
         runtime.last_history_sync
         and now - runtime.last_history_sync < HISTORY_SYNC_MIN_INTERVAL
     ):
+        # Too soon after the last run (a car home again minutes after the
+        # run at Home Assistant's start, a bench): book it for the end of the
+        # window instead of dropping it, unless a follow-up is already due.
+        if runtime.history_followup is None:
+            _schedule_history_followup(
+                hass, entry, HISTORY_SYNC_MIN_INTERVAL - (now - runtime.last_history_sync),
+            )
         return
     runtime.last_history_sync = now
+    runtime.history_followups = 0
     hass.async_create_task(_async_request_history_sync(hass, entry))
+
+
+def async_request_history_sync_now(hass: HomeAssistant, entry: MeatPiConfigEntry) -> bool:
+    """Run a catch-up on request (the Catch up history button), rate limit aside.
+
+    Returns False when the device has no data logger to read.
+    """
+    runtime = getattr(entry, "runtime_data", None)
+    if runtime is None or not runtime.capabilities.has_component(COMPONENT_DATA_LOGGER):
+        return False
+    runtime.last_history_sync = time.monotonic()
+    runtime.history_followups = 0
+    hass.async_create_task(_async_request_history_sync(hass, entry))
+    return True
+
+
+def _cancel_history_followup(runtime: MeatPiRuntimeData) -> None:
+    if runtime.history_followup is not None:
+        runtime.history_followup()
+        runtime.history_followup = None
+    runtime.history_followup_due = None
+
+
+def _schedule_history_followup(
+    hass: HomeAssistant, entry: MeatPiConfigEntry, delay: float,
+) -> None:
+    """Come back for what one run could not take: the hour still running
+    (imported once it has ended) or a device with more rows than one run
+    reads. One timer per entry, replaced by each run, bounded in a row."""
+    runtime = getattr(entry, "runtime_data", None)
+    if runtime is None:
+        return
+    _cancel_history_followup(runtime)
+    if runtime.history_followups >= HISTORY_MAX_FOLLOWUPS:
+        _LOGGER.warning(
+            "History sync for %s: %d follow-up runs in a row; waiting for the "
+            "next reconnect instead",
+            entry.title,
+            runtime.history_followups,
+        )
+        return
+    runtime.history_followups += 1
+
+    @callback
+    def _fire(_now: Any) -> None:
+        current = getattr(entry, "runtime_data", None)
+        if current is None:
+            return
+        current.history_followup = None
+        current.history_followup_due = None
+        if not entry.options.get(CONF_HISTORY_SYNC, DEFAULT_HISTORY_SYNC):
+            return
+        current.last_history_sync = time.monotonic()
+        hass.async_create_task(_async_request_history_sync(hass, entry))
+
+    runtime.history_followup = async_call_later(hass, delay, _fire)
+    runtime.history_followup_due = time.time() + delay
 
 
 async def _async_request_history_sync(
     hass: HomeAssistant,
     entry: MeatPiConfigEntry,
 ) -> None:
-    """Run a history backfill, coalescing concurrent requests.
+    """Run a history catch-up, coalescing concurrent requests.
 
     Same pattern as webhook registration and the capability probe: one run
     at a time, requests arriving meanwhile fold into a single trailing
-    re-run. The sync itself never raises.
+    re-run. The sync itself never raises. A run that leaves something for
+    later (the hour still running, more rows than it could take) books a
+    follow-up timer.
     """
     runtime = getattr(entry, "runtime_data", None)
     if runtime is None:
@@ -1129,6 +1220,10 @@ async def _async_request_history_sync(
             if current is None:
                 return
             current.last_history_result = result
+            if result.followup_in is not None:
+                _schedule_history_followup(hass, entry, result.followup_in)
+            elif result.ran:
+                current.history_followups = 0
     finally:
         runtime.history_sync_running = False
 
@@ -1425,3 +1520,176 @@ async def _async_entry_updated(hass: HomeAssistant, entry: MeatPiConfigEntry) ->
 
     # Re-register webhook with new interval (coalesced with any in-flight run)
     await _async_request_webhook_registration(hass, entry)
+
+
+# ---- the GPS track (2026-11-06) --------------------------------------------------
+
+SAVE_GPX_SCHEMA = vol.Schema(
+    {
+        vol.Required("device_id"): cv.string,
+        vol.Optional(ATTR_HOURS, default=DEFAULT_GPX_HOURS): vol.All(
+            vol.Coerce(int), vol.Range(min=1, max=MAX_GPX_HOURS),
+        ),
+    },
+)
+
+_GPX_SEGMENT = re.compile(r"<trkseg>.*?</trkseg>", re.DOTALL)
+
+
+def _entry_for_device(hass: HomeAssistant, device_id: str) -> MeatPiConfigEntry:
+    """The loaded MeatPi config entry behind a Home Assistant device id."""
+    device = dr.async_get(hass).async_get(device_id)
+    if device is None:
+        raise HomeAssistantError(
+            translation_domain=DOMAIN, translation_key="device_not_found",
+        )
+    for entry_id in device.config_entries:
+        entry = hass.config_entries.async_get_entry(entry_id)
+        if entry is not None and entry.domain == DOMAIN and getattr(
+            entry, "runtime_data", None,
+        ) is not None:
+            return entry
+    raise HomeAssistantError(
+        translation_domain=DOMAIN, translation_key="device_not_found",
+    )
+
+
+def merge_gpx_documents(documents: list[str]) -> str:
+    """One GPX document out of the device's pages (its scan caps a page).
+
+    The first page's header and track wrapper are kept; the track segments
+    of the later pages are appended before the closing tags. The device's
+    trailing comments are dropped.
+    """
+    if not documents:
+        return ""
+    first = documents[0]
+    first = first[: first.index("</trk>")] if "</trk>" in first else first
+    segments = [
+        seg for doc in documents[1:] for seg in _GPX_SEGMENT.findall(doc)
+    ]
+    return first + "\n".join(segments) + ("\n" if segments else "") + "</trk>\n</gpx>\n"
+
+
+def _write_text(path: str, text: str) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write(text)
+
+
+@callback
+async def _async_register_frontend(hass: HomeAssistant) -> None:
+    """Serve the GPS track card and register it as a frontend resource.
+
+    Once per Home Assistant run: the file under ``www/`` is served at
+    ``/wican-static/wican-gpx-card.js`` and loaded by every frontend, so
+    ``type: custom:wican-gpx-card`` works without a resource entry. The
+    version in the query string defeats a stale browser cache after an
+    update.
+    """
+    if hass.data.get(DATA_FRONTEND_REGISTERED):
+        return
+    http = getattr(hass, "http", None)
+    if http is None or "frontend" not in hass.config.components:
+        # no http or no frontend (a bare test instance, a headless setup):
+        # the card is then a manual resource; neither is forced by the
+        # manifest, a config entry must not start the HTTP server
+        return
+    hass.data[DATA_FRONTEND_REGISTERED] = True
+    # the integration's own view, not a generic static path: the content
+    # type is stated (a browser refuses a module script served as text,
+    # which a Pi's mime table did on the bench, 2026-11-06)
+    http.register_view(WicanStaticView())
+    version = await _async_integration_version(hass)
+    add_extra_js_url(hass, f"{FRONTEND_STATIC_URL}/{GPX_CARD_FILE}?v={version}")
+
+
+class WicanStaticView(HomeAssistantView):
+    """The integration's frontend files (the GPS track card)."""
+
+    url = FRONTEND_STATIC_URL + "/{filename}"
+    name = "wican:static"
+    requires_auth = False
+
+    async def get(self, request: web.Request, filename: str) -> web.StreamResponse:
+        """Serve one of the shipped files; anything else is 404."""
+        if filename != GPX_CARD_FILE:
+            raise web.HTTPNotFound
+        path = Path(__file__).parent / "www" / filename
+        if not path.is_file():
+            raise web.HTTPNotFound
+        return web.FileResponse(
+            path,
+            headers={
+                "Content-Type": "text/javascript; charset=utf-8",
+                "Cache-Control": "no-cache",
+            },
+        )
+
+
+async def _async_integration_version(hass: HomeAssistant) -> str:
+    """The integration's manifest version (for the card's cache key)."""
+    try:
+        integration = await async_get_integration(hass, DOMAIN)
+    except Exception:  # noqa: BLE001
+        return "0"
+    return str(integration.version or "0")
+
+
+def _async_setup_services(hass: HomeAssistant) -> None:
+    """Register the integration's services once (the first entry's setup)."""
+    if hass.services.has_service(DOMAIN, SERVICE_SAVE_GPX):
+        return
+
+    async def _async_save_gpx(call: ServiceCall) -> ServiceResponse:
+        entry = _entry_for_device(hass, call.data["device_id"])
+        api = entry.runtime_data.api
+        if api is None:
+            raise HomeAssistantError(
+                translation_domain=DOMAIN, translation_key="api_not_available",
+            )
+        hours = call.data[ATTR_HOURS]
+        since: str | None = str(int(time.time() - hours * 3600))
+        documents: list[str] = []
+        points = 0
+        for _ in range(GPX_MAX_PAGES):
+            try:
+                page = await api.async_download_gpx(since, limit=GPX_PAGE_POINTS)
+            except MeatPiApiError as err:
+                raise HomeAssistantError(
+                    translation_domain=DOMAIN,
+                    translation_key="api_command_failed",
+                    translation_placeholders={"error": str(err)},
+                ) from err
+            if page is None:
+                raise HomeAssistantError(
+                    translation_domain=DOMAIN, translation_key="gpx_not_supported",
+                )
+            if page.unsupported_format:
+                raise HomeAssistantError(
+                    translation_domain=DOMAIN, translation_key="gpx_log_format",
+                )
+            documents.append(page.text)
+            points += page.points
+            if not page.more or not page.cursor or page.cursor == since:
+                break
+            since = page.cursor
+        if points == 0:
+            raise HomeAssistantError(
+                translation_domain=DOMAIN, translation_key="gpx_no_points",
+                translation_placeholders={"hours": str(hours)},
+            )
+        device_tag = str(entry.data.get("device_id") or entry.entry_id)
+        name = f"{device_tag}_{time.strftime('%Y%m%d_%H%M%S', time.gmtime())}.gpx"
+        path = hass.config.path("www", GPX_DIR, name)
+        await hass.async_add_executor_job(_write_text, path, merge_gpx_documents(documents))
+        _LOGGER.info("GPS track of %s saved: %s (%d points)", entry.title, path, points)
+        return {"path": path, "url": f"/local/{GPX_DIR}/{name}", "points": points, "hours": hours}
+
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_SAVE_GPX,
+        _async_save_gpx,
+        schema=SAVE_GPX_SCHEMA,
+        supports_response=SupportsResponse.OPTIONAL,
+    )

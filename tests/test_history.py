@@ -12,8 +12,9 @@ from homeassistant.util import dt as dt_util
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.wican.api import MeatPiApiClient
+from custom_components.wican.api import LogExportPage, MeatPiApiClient
 from custom_components.wican.const import (
+    CONF_HISTORY_PREFER_LIVE,
     DOMAIN,
     HISTORY_MAX_FILES_PER_SYNC,
     HISTORY_MAX_PIDS_PER_SYNC,
@@ -25,6 +26,8 @@ from custom_components.wican.history import (
     aggregate_rows,
     async_remove_history_store,
     async_sync_history,
+    cursor_is_plausible,
+    followup_delay,
     normalize_row,
     parse_csv,
     parse_jsonl,
@@ -162,7 +165,8 @@ def test_aggregate_rows_window_filters() -> None:
 
     assert buckets["SOC"][H1].count == 1
     assert buckets["SOC"][H1].mean == 4
-    assert result.rows_rejected == 4
+    assert result.rows_rejected == 3
+    assert result.rows_deferred == 1  # the current hour waits for its end
 
 
 def test_aggregate_rows_pid_cap() -> None:
@@ -296,9 +300,18 @@ async def _entry_with_api(
     return mock_config_entry
 
 
+def _page(rows: list[Any], cursor: str | None = None, more: bool = False) -> LogExportPage:
+    """One page in the firmware's shape (the client already parsed it)."""
+    return LogExportPage(
+        rows=list(rows),
+        cursor=cursor if cursor is not None else f"1793900000:{len(rows)}",
+        more=more,
+    )
+
+
 def _export_rows(rows: list[dict[str, Any]]) -> AsyncMock:
     """Return an export mock serving all rows in one page, then empty."""
-    return AsyncMock(side_effect=[(rows, None)])
+    return AsyncMock(side_effect=[_page(rows)])
 
 
 async def test_sync_imports_hourly_statistics(
@@ -411,8 +424,11 @@ async def test_sync_live_hours_win(
     mock_config_entry: MockConfigEntry,
     mock_recorder_calls: dict[str, MagicMock],
 ) -> None:
-    """Hours that already carry live statistics are never overwritten."""
+    """With history_prefer_live, hours carrying live statistics are left alone."""
     entry = await _entry_with_api(hass, mock_config_entry)
+    hass.config_entries.async_update_entry(
+        entry, options={**entry.options, CONF_HISTORY_PREFER_LIVE: True},
+    )
     entry.runtime_data.api.async_export_log_rows = _export_rows(
         [
             {"ts": H1 + 60, "name": "SOC", "value": 70},
@@ -578,7 +594,7 @@ async def test_sync_export_cursor_stall_stops(
         {"ts": H1 + i, "name": "SOC", "value": i} for i in range(2000)
     ]
     entry.runtime_data.api.async_export_log_rows = AsyncMock(
-        return_value=(full_page, 0.0),  # full page but stalled cursor
+        return_value=LogExportPage(rows=full_page, cursor=None, more=True),
     )
 
     result = await async_sync_history(hass, entry)
@@ -630,11 +646,13 @@ async def test_watermark_store_roundtrip_and_removal(
     sync = HistorySync(hass, entry)
     assert await sync.async_get_watermark() == 0.0
 
-    await sync._async_save_watermark(12345.0)
+    await sync._async_save(12345.0, "1793900000:77")
     assert await HistorySync(hass, entry).async_get_watermark() == 12345.0
+    assert await HistorySync(hass, entry).async_get_cursor() == "1793900000:77"
 
     await async_remove_history_store(hass, entry)
     assert await HistorySync(hass, entry).async_get_watermark() == 0.0
+    assert await HistorySync(hass, entry).async_get_cursor() is None
 
 
 async def test_unexpected_error_never_escapes(
@@ -651,3 +669,197 @@ async def test_unexpected_error_never_escapes(
     result = await async_sync_history(hass, entry)
 
     assert result == HistorySyncResult()
+
+
+
+# ---------------------------------------------------------------------------
+# The firmware's shape and the device cursor (store and forward, 2026-11-06)
+# ---------------------------------------------------------------------------
+
+
+def test_normalize_row_firmware_shape() -> None:
+    """Epoch milliseconds and the source prefix read as seconds and the key."""
+    assert normalize_row(
+        {"ts": 1793900000123, "param": "autopid.SOC", "value": 71.5},
+    ) == (1793900000.123, "SOC", 71.5)
+    # csv rows arrive as strings
+    assert normalize_row(
+        {"ts": "1793900000500", "param": "autopid.EngineRPM", "value": "812"},
+    ) == (1793900000.5, "EngineRPM", 812.0)
+    # the proposal shape still reads
+    assert normalize_row({"ts": 1793900000, "name": "SOC", "value": 70}) == (
+        1793900000.0, "SOC", 70.0,
+    )
+    # a trailing dot leaves no name
+    assert normalize_row({"ts": 1793900000, "param": "autopid.", "value": 1}) is None
+
+
+def test_parse_jsonl_skips_the_firmware_meta_lines() -> None:
+    """_file, _cursor and clock-step marker lines are not rows."""
+    text = "\n".join(
+        [
+            '{"_file":"dl_1793900000.jsonl"}',
+            '{"ts":1793900000000,"param":"autopid.SOC","value":70}',
+            '{"ts":1793900001000,"event":"clock_step","delta_ms":120000,"source":"sntp"}',
+            '{"_cursor":"1793900000:120","more":false}',
+        ],
+    )
+    rows, bad = parse_jsonl(text)
+    assert len(rows) == 1 and bad == 0
+    assert normalize_row(rows[0]) == (1793900000.0, "SOC", 70.0)
+
+
+def test_cursor_plausibility() -> None:
+    """A cursor past the file being written is dropped; others are kept."""
+    status = {"file": "dl_1793900000.jsonl"}
+    assert cursor_is_plausible("1793899000:10", status)
+    assert cursor_is_plausible("1793900000:10", status)
+    assert not cursor_is_plausible("1793900001:0", status)
+    assert cursor_is_plausible("1793900001:0", {"file": ""})  # nothing open: trust it
+    assert cursor_is_plausible("1793900001:0", None)
+    assert cursor_is_plausible("1793999999", status)  # a plain epoch: always
+    assert not cursor_is_plausible("garbage", status)
+    assert not cursor_is_plausible(None, status)
+
+
+def test_followup_delay_rules() -> None:
+    """Deferred rows wait for the top of the hour; more rows come back soon."""
+    now = float(HOUR + 1800)
+    result = HistorySyncResult()
+    assert followup_delay(result, now) is None
+    result.rows_deferred = 3
+    assert followup_delay(result, now) == pytest.approx(1800 + 90)
+    result.more_pending = True
+    assert followup_delay(result, now) == 60
+
+
+async def test_sync_recorded_hours_replace_live_by_default(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_recorder_calls: dict[str, MagicMock],
+) -> None:
+    """The log is the complete record: its hour replaces the live one."""
+    entry = await _entry_with_api(hass, mock_config_entry)
+    entry.runtime_data.api.async_export_log_rows = _export_rows(
+        [
+            {"ts": H1 + 60, "name": "SOC", "value": 70},
+            {"ts": H2 + 60, "name": "SOC", "value": 65},
+        ],
+    )
+    registry = er.async_get(hass)
+    entity_id = registry.async_get_entity_id(
+        "sensor", DOMAIN, f"{entry.entry_id}_pid_SOC",
+    )
+    mock_recorder_calls["during"].return_value = {
+        entity_id: [{"start": float(H1)}],
+    }
+
+    result = await async_sync_history(hass, entry)
+
+    assert result.hours_skipped_existing == 0
+    assert result.hours_overwritten_live == 1
+    assert result.hours_imported == 2
+
+
+async def test_sync_deferred_rows_hold_the_cursor_and_book_a_followup(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_recorder_calls: dict[str, MagicMock],
+) -> None:
+    """Rows of the hour still running keep the cursor at their page.
+
+    The next run must read them again once the hour has ended, so the
+    saved cursor is the START of the first page that carried one, and
+    the run asks for a follow-up past the top of the hour.
+    """
+    entry = await _entry_with_api(hass, mock_config_entry)
+    api = entry.runtime_data.api
+    api.async_export_log_rows = AsyncMock(
+        side_effect=[
+            _page([{"ts": (H1 + 60) * 1000, "param": "autopid.SOC", "value": 70}], cursor="1793900000:3", more=True),
+            _page([{"ts": (HOUR + 60) * 1000, "param": "autopid.SOC", "value": 65}], cursor="1793900000:5", more=False),
+        ],
+    )
+
+    result = await async_sync_history(hass, entry)
+
+    assert result.hours_imported == 1
+    assert result.rows_deferred == 1
+    assert result.cursor == "1793900000:3"
+    assert result.followup_in is not None and result.followup_in > 0
+    assert await HistorySync(hass, entry).async_get_cursor() == "1793900000:3"
+    assert result.watermark == H1 + 3600
+    # the first call started at the age limit as a plain epoch (no cursor
+    # yet), the second at the page cursor; a later run starts at the saved
+    # cursor
+    first_since = api.async_export_log_rows.call_args_list[0].args[0]
+    assert first_since.isdigit()
+    assert abs(int(first_since) - (time.time() - 30 * 86400)) < 3600
+    assert api.async_export_log_rows.call_args_list[1].args[0] == "1793900000:3"
+    api.async_export_log_rows = AsyncMock(side_effect=[_page([], cursor="1793900000:3")])
+    await async_sync_history(hass, entry)
+    assert api.async_export_log_rows.call_args_list[0].args[0] == "1793900000:3"
+
+
+async def test_sync_consumed_rows_advance_the_cursor_without_an_import(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_recorder_calls: dict[str, MagicMock],
+) -> None:
+    """Rows for PIDs without an entity are consumed: the cursor moves on."""
+    entry = await _entry_with_api(hass, mock_config_entry, pids=("SOC",))
+    entry.runtime_data.api.async_export_log_rows = _export_rows(
+        [{"ts": H1 + 60, "name": "NEVER_SEEN", "value": 1}],
+    )
+
+    result = await async_sync_history(hass, entry)
+
+    assert result.pids_imported == 0
+    assert result.cursor == "1793900000:1"
+    assert await HistorySync(hass, entry).async_get_cursor() == "1793900000:1"
+    assert await HistorySync(hass, entry).async_get_watermark() == 0.0
+
+
+async def test_sync_implausible_cursor_restarts_from_the_watermark(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_recorder_calls: dict[str, MagicMock],
+) -> None:
+    """A cursor past the file being written (card wiped) is dropped."""
+    entry = await _entry_with_api(hass, mock_config_entry)
+    await HistorySync(hass, entry)._async_save(float(H1), "1793999999:40")
+    api = entry.runtime_data.api
+    api.async_get_logger_status = AsyncMock(
+        return_value={"enabled": True, "format": "jsonl", "file": "dl_1793900000.jsonl"},
+    )
+    api.async_export_log_rows = _export_rows(
+        [{"ts": H2 + 60, "name": "SOC", "value": 65}],
+    )
+
+    result = await async_sync_history(hass, entry)
+
+    assert any("past the file being written" in e for e in result.errors)
+    assert api.async_export_log_rows.call_args_list[0].args[0] == str(H1)
+    assert result.hours_imported == 1
+    assert result.device["format"] == "jsonl"
+
+
+async def test_sync_unsupported_format_imports_nothing(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_recorder_calls: dict[str, MagicMock],
+) -> None:
+    """A params stream in sqlite or binary is reported, never fetched as files."""
+    entry = await _entry_with_api(hass, mock_config_entry)
+    api = entry.runtime_data.api
+    api.async_export_log_rows = AsyncMock(
+        return_value=LogExportPage(unsupported_format=True),
+    )
+
+    result = await async_sync_history(hass, entry)
+
+    assert result.ran
+    assert result.source == "export"
+    assert any("not JSON lines or CSV" in e for e in result.errors)
+    api.async_fs_list.assert_not_called()
+    mock_recorder_calls["import"].assert_not_called()

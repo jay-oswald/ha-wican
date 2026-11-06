@@ -146,35 +146,79 @@ without deleting and re-adding the integration.
 - If no local HTTP Home Assistant URL is available, WiCAN-Pro `v4.49+` can fall
   back to a single external HTTPS webhook URL.
 
-## History backfill (offline drives)
+## Store and forward (history catch-up for offline drives)
 
-A vehicle spends most of its life away from your WiFi. If the device has
-its **data logger** enabled (firmware V6+, SD card), it keeps recording
-AutoPID data with timestamps while offline. When it reconnects, this
-integration detects the gap, fetches the logged rows, and imports them
-into each PID sensor's **long-term statistics** at the times they were
-recorded — filling the gap in the long-term graphs.
+A vehicle spends most of its life away from your WiFi. With **Store and
+forward** switched on in the device's web interface (Automate > Home
+Assistant; it sets the data logger to JSON lines with every AutoPID sample,
+and it is unavailable without a usable SD card), the device keeps recording
+its vehicle parameters while it is away. When it reconnects, this
+integration notices the gap, pulls the recorded rows from the device's own
+read cursor (`GET /api/logger/export`), and imports them into each PID
+sensor's **long-term statistics** at the hours they were recorded, filling
+the gap in the long-term graphs. While it reads, the device holds off its
+sleep countdown a minute at a time (ten minutes at most), so the pull
+finishes before the car goes to sleep.
 
 What to expect:
 
 - Backfilled data appears at **hourly resolution** (mean/min/max per
-  hour). This matches Home Assistant's permanent history layer — even
+  hour). This matches Home Assistant's permanent history layer: even
   live-recorded data is reduced to hourly statistics after the recorder
-  retention window (default 10 days), so older backfilled drives are
-  indistinguishable from live-recorded ones.
+  retention window (default 10 days).
 - The fine-grained history detail view and logbook stay empty for the
   offline period (Home Assistant has no supported way to backfill raw
-  states), automations are never retro-triggered, and GPS location
-  history cannot be backfilled.
-- Live data always wins: hours Home Assistant already recorded are never
-  overwritten, and re-syncs are idempotent.
-- Requirements: firmware with the data logger enabled (params stream in
-  `jsonl` or `csv` format for current firmware), an SD card, and a valid
-  device clock (the device syncs via SNTP/RTC).
+  states) and automations are never retro-triggered.
+- The hour still running is imported once it has ended (a follow-up run
+  past the top of the next hour); a drive too long for one run continues
+  a minute later. The recorded hours replace the live statistics of the
+  same hour by default, because the log is the complete record of it and
+  the live pushes are samples of it (the option **Keep the live statistics
+  of hours the device also recorded** restores the old rule). Re-runs are
+  idempotent.
+- Requirements: a firmware with the export route (V6; the 2026-11 build
+  adds the sleep hold and the export counters), the params stream in
+  `jsonl` or `csv` (Store and forward sets it; a `sqlite` or `binary`
+  log is reported in the diagnostics and imports nothing), an SD card, and
+  a valid device clock (SNTP or the RTC).
 
 The sync runs automatically when the device reconnects after a gap and
-shortly after Home Assistant starts; it can be disabled per device in
-the integration options.
+shortly after Home Assistant starts; the **Catch up history** button on
+the device page runs it on request; both can be turned off per device in
+the integration options. The diagnostics download carries the last run
+(`history_sync`: pages, rows fetched, used, deferred, hours and sensors
+imported, the cursor, the follow-up, the device's logger state).
+
+### The GPS track (GPX)
+
+**The map card.** The integration ships a Lovelace card that draws a
+device's recorded track on Home Assistant's own map (no resource entry
+needed, the integration registers it):
+
+```yaml
+type: custom:wican-gpx-card
+device_id: <the WiCAN device>   # or url: /local/wican/<file>.gpx
+hours: 24                       # how far back (1..720)
+title: GPS track
+height: 320                     # px
+```
+
+With `device_id` the card calls `wican.save_gpx` when it is shown and
+draws the file it saved (one path per track segment, a new segment
+after ten minutes without a fix); with `url` it draws a file already
+under `www/wican/`. The line under the map names the points and the
+span, or says why there is nothing (no SD card log, a log not in JSON
+lines or CSV, no fix in the window).
+
+A position has no statistics and Home Assistant cannot write a past
+location, so the GPS fix the device records (the `gps_*` parameters,
+when a GPS receiver or an ESPNetLink is attached) is not backfilled onto
+the Location tracker. Instead the service **`wican.save_gpx`** (fields:
+the device, hours back, default 24) fetches the recorded fix from the
+device as a GPX 1.1 track (`GET /api/logger/gpx`) and saves it under
+`<config>/www/wican/`, where it is served as `/local/wican/<file>.gpx`;
+the service response carries the path, the URL and the point count. The
+device's Logger page offers the same download.
 
 ## Use cases
 

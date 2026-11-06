@@ -9,7 +9,7 @@ registers / OTA-updates the device through a configurable mock aiohttp session.
 wired into ``aioclient_mock``, it answers the integration's *real* capability
 probe and control commands, with programmable failure modes (offline, timeout,
 HTTP 403/500, garbage bodies, legacy shapes). Together with the device-type
-presets it can impersonate every MeatPi product — legacy WiCAN, V6 WiCAN
+presets it can impersonate every MeatPi product: legacy WiCAN, V6 WiCAN
 Pro/USB, ESPNetlink, or a generic future device.
 
 Used by ``test_device_simulation.py`` (baseline behaviour),
@@ -174,6 +174,18 @@ class SimulatedDeviceApi:
         self.export_supported = False
         self.export_rows: list[dict[str, Any]] = []
         self.export_payload_override: str | None = None
+        # "firmware" = the shape the real route serves (epoch ms, the
+        # `autopid.` prefix, `_file` and `_cursor` lines, a <epoch>:<offset>
+        # cursor); "proposal" = the 2026-07 proposal (seconds, bare names,
+        # an X-Next-Since header) the integration still accepts.
+        self.export_shape = "firmware"
+        self.export_file_epoch = 1793900000
+        self.export_calls: list[str | None] = []  # the `since` of each call
+        self.export_unsupported_format = False  # a sqlite/binary params stream
+        # the GPS track route: None = a firmware without it (404); a list of
+        # documents served page after page (the last one says more=false)
+        self.gpx_documents: list[str] | None = None
+        self.gpx_calls: list[dict[str, str]] = []
         self.logger_dir = "/sd/logs"
         self.log_files: dict[str, str] = {}
         self.active_log_file: str | None = None
@@ -198,6 +210,7 @@ class SimulatedDeviceApi:
             ("delete", "/api/webhook"),
             ("get", "/api/logger"),
             ("get", "/api/logger/export"),
+            ("get", "/api/logger/gpx"),
             ("get", "/api/fs/list"),
             ("get", "/api/fs/download"),
         ):
@@ -274,7 +287,7 @@ class SimulatedDeviceApi:
                     },
                 )
             # Legacy firmware answers /api/status with the flat status object
-            # (no "bits") — a positive "not V6" signal.
+            # (no "bits"), a positive "not V6" signal.
             return self._json(
                 method, url, {"batt_voltage": "12.6V", "ecu_status": "online"},
             )
@@ -307,6 +320,12 @@ class SimulatedDeviceApi:
             )
         if path == "/api/logger/export":
             return self._export(method, url)
+        if path == "/api/logger/gpx":
+            if self.gpx_documents is None:
+                return self._json(method, url, {"error": "not found"}, status=404)
+            self.gpx_calls.append(dict(url.query))
+            index = min(len(self.gpx_calls) - 1, len(self.gpx_documents) - 1)
+            return AiohttpClientMockResponse(method, url, text=self.gpx_documents[index])
         if path == "/api/fs/list":
             if url.query.get("path") != self.logger_dir:
                 return self._json(method, url, {"error": "invalid path"}, status=400)
@@ -349,28 +368,75 @@ class SimulatedDeviceApi:
         """Serve the cursor-based NDJSON export route (firmware ask #8)."""
         if not self.export_supported:
             return self._json(method, url, {"error": "not found"}, status=404)
+        if self.export_unsupported_format:
+            return AiohttpClientMockResponse(
+                method, url, text="params stream is not jsonl or csv", status=400,
+            )
         if self.export_payload_override is not None:
             return AiohttpClientMockResponse(
                 method, url, text=self.export_payload_override,
             )
-        try:
-            since = float(url.query.get("since", "0"))
-        except ValueError:
-            since = 0.0
+        raw_since = url.query.get("since")
+        self.export_calls.append(raw_since)
         try:
             limit = max(1, int(url.query.get("limit", "1000")))
         except ValueError:
             limit = 1000
-        matching = sorted(
-            (row for row in self.export_rows if row.get("ts", 0) > since),
-            key=lambda row: row.get("ts", 0),
+        ordered = sorted(self.export_rows, key=lambda row: row.get("ts", 0))
+
+        if self.export_shape == "proposal":
+            try:
+                since = float(raw_since or "0")
+            except ValueError:
+                since = 0.0
+            matching = [row for row in ordered if row.get("ts", 0) > since]
+            page = matching[:limit]
+            body = "\n".join(json.dumps(row) for row in page)
+            headers = {}
+            if page:
+                headers["X-Next-Since"] = str(page[-1].get("ts", since))
+            return AiohttpClientMockResponse(method, url, text=body, headers=headers)
+
+        # The firmware's cursor is "<file-epoch>:<byte offset>"; the
+        # simulator keeps one file and uses the row index as the offset. A
+        # plain epoch (seconds or ms) means the rows from that moment on.
+        start = 0
+        if raw_since and ":" in raw_since:
+            try:
+                start = int(raw_since.split(":", 1)[1])
+            except ValueError:
+                start = 0
+        elif raw_since:
+            try:
+                moment = float(raw_since)
+            except ValueError:
+                moment = 0.0
+            if moment > 100_000_000_000:
+                moment /= 1000.0
+            start = next(
+                (i for i, row in enumerate(ordered) if row.get("ts", 0) >= moment),
+                len(ordered),
+            )
+        page = ordered[start:start + limit]
+        lines = [json.dumps({"_file": f"dl_{self.export_file_epoch}.jsonl"})]
+        for row in page:
+            ts = row.get("ts", 0)
+            lines.append(
+                json.dumps(
+                    {
+                        "ts": int(round(float(ts) * 1000)),
+                        "param": f"autopid.{row.get('name')}",
+                        "value": row.get("value"),
+                    },
+                ),
+            )
+        end = start + len(page)
+        lines.append(
+            json.dumps(
+                {"_cursor": f"{self.export_file_epoch}:{end}", "more": end < len(ordered)},
+            ),
         )
-        page = matching[:limit]
-        body = "\n".join(json.dumps(row) for row in page)
-        headers = {}
-        if page:
-            headers["X-Next-Since"] = str(page[-1].get("ts", since))
-        return AiohttpClientMockResponse(method, url, text=body, headers=headers)
+        return AiohttpClientMockResponse(method, url, text="\n".join(lines) + "\n")
 
     @staticmethod
     def _json(

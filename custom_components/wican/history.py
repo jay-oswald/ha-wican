@@ -1,27 +1,36 @@
-"""SD-card history backfill into Home Assistant long-term statistics.
+"""SD-card history catch-up into Home Assistant long-term statistics.
 
-A MeatPi device that was driving offline logs timestamped AutoPID rows to
-its SD card (the firmware ``data_logger`` params stream). When the device
-reconnects, this module fetches the rows recorded during the gap,
-aggregates them into hourly mean/min/max buckets, and imports them onto
-the matching PID sensor entities via Home Assistant's official recorder
-statistics API — filling the gap in each sensor's long-term history at
-the times the data was actually recorded.
+A MeatPi device that was driving away from home logs timestamped AutoPID
+rows to its SD card (the firmware ``data_logger`` params stream). When the
+device reconnects, this module fetches the rows recorded since the last
+run, aggregates them into hourly mean/min/max buckets, and imports them
+onto the matching PID sensor entities via Home Assistant's official
+recorder statistics API, filling the gap in each sensor's long-term
+history at the times the data was actually recorded.
 
 Design and constraints: notes/HISTORICAL_DATA_SYNC.md. Key invariants:
 
 - Only the official ``async_import_statistics`` API is used (hourly
   resolution; raw states are never touched).
-- Live data always wins: hours that already have statistics, and the
-  current (incomplete) hour, are never imported.
-- Everything is bounded (rows, files, bytes, distinct PIDs, age window)
-  so a glitching or hostile device cannot balloon memory or statistics.
-- The watermark never passes data that was not durably imported: a
-  failed PID holds it at that PID's earliest failed hour, files beyond
-  the per-sync cap defer the newest (still ahead of the watermark), and
-  an hour cut short by the row cap is dropped rather than imported from
-  partial data. An interrupted sync simply re-runs; re-importing an
-  hour is idempotent.
+- The current (incomplete) hour is never imported: its rows are deferred
+  and a follow-up run picks them up after the hour has ended.
+- Hours the device recorded replace the live statistics of the same hour
+  by default (the log is the complete record, the live pushes are samples
+  of it: the drive's last hour would otherwise keep only the minutes after
+  the car got home); the ``history_prefer_live`` option keeps the old
+  "live wins" rule.
+- Everything is bounded (rows, pages, files, bytes, distinct PIDs, age
+  window) so a glitching or hostile device cannot balloon memory or
+  statistics; what did not fit continues in a follow-up run.
+- Two marks are kept per entry: the TIME watermark (the newest imported
+  hour end; the import guard) and the device's READ cursor (where the
+  next pull starts). The cursor never passes a row that was not imported
+  or discarded for good: deferred rows and a failed PID's hours roll it
+  back to the start of the page that holds them. An interrupted sync
+  simply re-runs; re-importing an hour is idempotent.
+- The device's export (firmware ``GET /api/logger/export``) stamps rows in
+  epoch MILLISECONDS and names them ``<source>.<name>``; the old proposal
+  (seconds, bare names) is accepted too.
 - A sync failure is contained: it never disturbs telemetry or control.
 """
 
@@ -34,6 +43,7 @@ import io
 import json
 import logging
 from math import isfinite
+import re
 from typing import TYPE_CHECKING, Any
 
 from homeassistant.components.recorder.models import StatisticMeanType
@@ -49,9 +59,14 @@ from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
 from .const import (
+    CLOCK_JOURNAL_BOOT_SLACK_MS,
+    CONF_HISTORY_PREFER_LIVE,
+    DEFAULT_HISTORY_PREFER_LIVE,
     DOMAIN,
     HISTORY_EXPORT_MAX_PAGES,
     HISTORY_EXPORT_PAGE_ROWS,
+    HISTORY_FOLLOWUP_HOUR_MARGIN,
+    HISTORY_FOLLOWUP_MORE_DELAY,
     HISTORY_FUTURE_SKEW,
     HISTORY_MAX_AGE_DAYS,
     HISTORY_MAX_FILE_BYTES,
@@ -59,6 +74,7 @@ from .const import (
     HISTORY_MAX_PIDS_PER_SYNC,
     HISTORY_MAX_ROWS_PER_SYNC,
     HISTORY_STORAGE_VERSION,
+    HISTORY_TS_MS_THRESHOLD,
     MAX_PID_KEY_LENGTH,
 )
 from .exceptions import MeatPiApiError
@@ -74,10 +90,13 @@ if TYPE_CHECKING:
 _LOGGER = logging.getLogger(__name__)
 
 # Row-field aliases accepted from device logs (jsonl/csv headers vary by
-# firmware version; the export route uses the first alias of each).
-_TS_KEYS = ("ts", "timestamp", "time", "epoch")
+# firmware version; the firmware's export route uses ts / param / value).
+_TS_KEYS = ("ts", "ts_ms", "timestamp", "time", "epoch")
 _NAME_KEYS = ("name", "param", "pid")
 _VALUE_KEYS = ("value", "val")
+
+# The firmware names its params files dl_<10-digit epoch>.<ext>.
+_LOG_FILE_RE = re.compile(r"^dl_(\d{10})\.[a-z0-9]+$")
 
 
 @dataclass(slots=True)
@@ -86,15 +105,24 @@ class HistorySyncResult:
 
     ran: bool = False
     source: str | None = None  # "export" | "files" | None
+    pages: int = 0
     rows_fetched: int = 0
     rows_used: int = 0
     rows_rejected: int = 0
+    rows_rebased: int = 0  # stamps corrected with the device's clock journal
+    rows_deferred: int = 0  # in the current hour: a follow-up takes them
     hours_imported: int = 0
-    hours_skipped_existing: int = 0
+    hours_skipped_existing: int = 0  # prefer_live: live hours left alone
+    hours_overwritten_live: int = 0  # default: recorded hours replaced live ones
     pids_imported: int = 0
     pids_skipped: int = 0
     errors: list[str] = field(default_factory=list)
     watermark: float | None = None
+    cursor: str | None = None  # the device read cursor saved by this run
+    more_pending: bool = False  # the device has more than one run could take
+    followup_in: float | None = None  # seconds until a follow-up run is due
+    device: dict[str, Any] | None = None  # the device logger's state
+    finished_at: float | None = None  # epoch seconds
 
 
 @dataclass(slots=True)
@@ -121,6 +149,14 @@ class _Bucket:
         return self.total / self.count
 
 
+@dataclass(slots=True)
+class _PageMark:
+    """Where a fetched page started and the newest row it carried."""
+
+    start_cursor: str | None
+    max_ts: float | None
+
+
 def _coerce_float(value: Any) -> float | None:
     """Return a finite float from a device value, or None."""
     if isinstance(value, bool):
@@ -143,17 +179,111 @@ def _first_key(row: dict[str, Any], keys: tuple[str, ...]) -> Any:
     return None
 
 
-def normalize_row(raw: Any) -> tuple[float, str, float] | None:
-    """Validate one raw log row into (ts, name, value), or None.
+@dataclass(slots=True)
+class _ClockStep:
+    """One set or step of the device's clock while a log file was open."""
 
-    Accepts dict rows with aliased field names. Anything malformed —
-    non-dict, missing fields, non-finite values, absurd names — is
-    rejected (the caller counts rejects; a bad row never aborts a sync).
+    before_ms: float  # the wall clock just before the step
+    delta_ms: float  # what the step added (negative for a backward one)
+    origin_ms: float | None  # the boot's wall origin as that clock had it
+
+
+def journal_steps_by_file(events: list[dict[str, Any]]) -> dict[str, list[_ClockStep]]:
+    """The clock journal's steps per log file, in journal order.
+
+    Mirrors the device's own `tools/log_clock.py` and the web UI: a
+    ``boot`` line fixes the boot's wall origin (its ``ts`` minus
+    ``up_ms``), every ``valid`` or ``step`` line lists the files open at
+    the time and moves the origin along by its ``delta_ms``.
+    """
+    out: dict[str, list[_ClockStep]] = {}
+    origin: float | None = None
+    for event in events:
+        kind = event.get("ev")
+        if kind == "boot":
+            ts = _coerce_float(event.get("ts"))
+            up_ms = _coerce_float(event.get("up_ms"))
+            origin = (ts - (up_ms or 0.0)) if ts is not None else None
+            continue
+        if kind not in ("valid", "step"):
+            continue
+        delta = _coerce_float(event.get("delta_ms")) or 0.0
+        before = _coerce_float(event.get("ts_before"))
+        files = event.get("files")
+        if before is not None and isinstance(files, list):
+            for name in files:
+                if isinstance(name, str):
+                    out.setdefault(name, []).append(_ClockStep(before, delta, origin))
+        if origin is not None:
+            origin += delta
+    return out
+
+
+def rebase_row(raw: Any, steps: dict[str, list[_ClockStep]]) -> bool:
+    """Correct a row's stamp as the device's clock would have written it.
+
+    Every step that happened while the row's file was open and after the
+    row (its stamp at or before the step's ``ts_before``) is added; a row
+    older than the boot's origin was written by an earlier boot into a
+    resumed file and keeps its stamp. The row is changed in place; True
+    when it moved. Rows stamped in seconds (the proposal shape) are moved
+    in seconds.
+    """
+    if not isinstance(raw, dict):
+        return False
+    name = raw.get("_file")
+    if not isinstance(name, str) or name not in steps:
+        return False
+    key = next((k for k in _TS_KEYS if k in raw), None)
+    if key is None:
+        return False
+    ts = _coerce_float(raw.get(key))
+    if ts is None or ts <= 0:
+        return False
+    in_seconds = ts <= HISTORY_TS_MS_THRESHOLD
+    ts_ms = ts * 1000.0 if in_seconds else ts
+    moved = ts_ms
+    for step in steps[name]:
+        if moved <= step.before_ms and (
+            step.origin_ms is None
+            or moved >= step.origin_ms - CLOCK_JOURNAL_BOOT_SLACK_MS
+        ):
+            moved += step.delta_ms
+    if moved == ts_ms:
+        return False
+    raw[key] = moved / 1000.0 if in_seconds else moved
+    return True
+
+
+def row_timestamp(raw: Any) -> float | None:
+    """The row's timestamp in epoch SECONDS, or None.
+
+    The firmware stamps in milliseconds (issue #984: the logger's wall
+    stamps are epoch ms everywhere); a value past the threshold is read
+    as milliseconds, anything else as seconds (the old proposal shape).
     """
     if not isinstance(raw, dict):
         return None
     ts = _coerce_float(_first_key(raw, _TS_KEYS))
     if ts is None or ts <= 0:
+        return None
+    if ts > HISTORY_TS_MS_THRESHOLD:
+        ts /= 1000.0
+    return ts
+
+
+def normalize_row(raw: Any) -> tuple[float, str, float] | None:
+    """Validate one raw log row into (ts seconds, name, value), or None.
+
+    Accepts dict rows with aliased field names. The firmware's rows name
+    the parameter ``<source>.<name>`` (``autopid.SOC``): the name after
+    the last dot is the push's ``autopid_data`` key, which is what the PID
+    entity is registered under. Anything malformed (non-dict, missing
+    fields, non-finite values, absurd names) is rejected; the caller
+    counts rejects, a bad row never aborts a sync.
+    """
+    ts = row_timestamp(raw)
+    if ts is None:
         return None
     name = _first_key(raw, _NAME_KEYS)
     if (
@@ -162,14 +292,23 @@ def normalize_row(raw: Any) -> tuple[float, str, float] | None:
         or len(name) > MAX_PID_KEY_LENGTH
     ):
         return None
+    name = name.strip()
+    if "." in name:
+        name = name.rsplit(".", 1)[1]
+        if not name:
+            return None
     value = _coerce_float(_first_key(raw, _VALUE_KEYS))
     if value is None:
         return None
-    return ts, name.strip(), value
+    return ts, name, value
 
 
 def parse_jsonl(text: str) -> tuple[list[dict[str, Any]], int]:
-    """Parse NDJSON/JSONL text into raw rows; returns (rows, undecodable)."""
+    """Parse NDJSON/JSONL text into raw rows; returns (rows, undecodable).
+
+    The firmware's meta lines (``{"_file": ...}``, ``{"_cursor": ...}``)
+    and its clock-step markers are not rows and are left out.
+    """
     rows: list[dict[str, Any]] = []
     bad = 0
     for line in text.splitlines():
@@ -181,10 +320,12 @@ def parse_jsonl(text: str) -> tuple[list[dict[str, Any]], int]:
         except ValueError:
             bad += 1
             continue
-        if isinstance(decoded, dict):
-            rows.append(decoded)
-        else:
+        if not isinstance(decoded, dict):
             bad += 1
+            continue
+        if "_cursor" in decoded or "_file" in decoded or "event" in decoded:
+            continue
+        rows.append(decoded)
     return rows, bad
 
 
@@ -192,7 +333,8 @@ def parse_csv(text: str) -> tuple[list[dict[str, Any]], int]:
     """Parse CSV log text into raw rows; returns (rows, undecodable).
 
     The first row must be a header naming (aliases of) ts/name/value
-    columns; unknown columns are ignored.
+    columns (the firmware writes ``ts_ms,param,value``); unknown columns
+    are ignored.
     """
     rows: list[dict[str, Any]] = []
     bad = 0
@@ -216,6 +358,11 @@ def _in_window(
     live-recorded) hour. ``oldest`` is inclusive-start: a row exactly at
     the watermark belongs to the first hour not yet imported."""
     return oldest <= ts <= now_ts + HISTORY_FUTURE_SKEW and ts < current_hour
+
+
+def _deferred(ts: float, *, now_ts: float, current_hour: int) -> bool:
+    """A sane row of the hour still running: imported by a later run."""
+    return current_hour <= ts <= now_ts + HISTORY_FUTURE_SKEW
 
 
 def _discard_unfinished_hours(
@@ -261,6 +408,7 @@ def _discard_unfinished_hours(
         result.errors.append(
             f"{dropped} hour bucket(s) cut short by the row cap deferred",
         )
+        result.more_pending = True
 
 
 def aggregate_rows(
@@ -273,9 +421,11 @@ def aggregate_rows(
     """Aggregate raw rows into per-PID, per-hour buckets, bounded.
 
     Rows outside [since, current-hour) or beyond the sanity window are
-    rejected. Returns {pid_name: {hour_epoch: bucket}}. When the row cap
-    is hit, hours the leftover rows could still touch are discarded so a
-    partially-aggregated hour is never imported.
+    rejected; rows of the current hour are deferred (counted apart, the
+    earliest kept in ``result.followup_in``'s reckoning). Returns
+    {pid_name: {hour_epoch: bucket}}. When the row cap is hit, hours the
+    leftover rows could still touch are discarded so a partially
+    aggregated hour is never imported.
     """
     current_hour = int(now_ts // 3600) * 3600
     oldest = max(since, now_ts - HISTORY_MAX_AGE_DAYS * 86400)
@@ -301,7 +451,12 @@ def aggregate_rows(
         if not _in_window(
             ts, oldest=oldest, now_ts=now_ts, current_hour=current_hour,
         ):
-            result.rows_rejected += 1
+            if ts >= oldest and _deferred(
+                ts, now_ts=now_ts, current_hour=current_hour,
+            ):
+                result.rows_deferred += 1
+            else:
+                result.rows_rejected += 1
             continue
         pid_buckets = buckets.get(name)
         if pid_buckets is None:
@@ -319,8 +474,65 @@ def aggregate_rows(
     return buckets
 
 
+def cursor_file_epoch(cursor: str | None) -> int | None:
+    """The file epoch a device cursor (``<epoch>:<offset>``) points at."""
+    if not isinstance(cursor, str) or ":" not in cursor:
+        return None
+    head = cursor.split(":", 1)[0]
+    return int(head) if head.isdigit() else None
+
+
+def log_file_epoch(name: Any) -> int | None:
+    """The epoch in a params log file name (``dl_<epoch>.jsonl``)."""
+    if not isinstance(name, str):
+        return None
+    match = _LOG_FILE_RE.match(name)
+    return int(match.group(1)) if match else None
+
+
+def cursor_is_plausible(cursor: str | None, status: dict[str, Any] | None) -> bool:
+    """Whether a stored device cursor can still name a place on the card.
+
+    A cursor past the file being written now (the card was wiped or
+    swapped, the device's clock went back) would make the device answer
+    nothing for good; such a cursor is dropped and the pull restarts
+    from the time watermark. A cursor at a retired file is fine: the
+    device resumes at the next newer one.
+    """
+    if isinstance(cursor, str) and cursor.isdigit():
+        return True  # a plain epoch: the device finds the file itself
+    epoch = cursor_file_epoch(cursor)
+    if epoch is None:
+        return False
+    if not isinstance(status, dict):
+        return True
+    active = log_file_epoch(status.get("file"))
+    if active is None:
+        return True
+    return epoch <= active
+
+
+def followup_delay(result: HistorySyncResult, now_ts: float) -> float | None:
+    """Seconds until a follow-up run is due, or None when nothing waits.
+
+    Rows of the hour still running are imported once that hour has ended
+    (a margin past the top of the hour: the device's last batch of it is
+    written up to ``flush_ms`` later); a device with more than one run
+    could take is read again soon.
+    """
+    if result.more_pending:
+        return float(HISTORY_FOLLOWUP_MORE_DELAY)
+    if result.rows_deferred:
+        next_hour = (int(now_ts // 3600) + 1) * 3600
+        return max(
+            float(HISTORY_FOLLOWUP_MORE_DELAY),
+            next_hour + HISTORY_FOLLOWUP_HOUR_MARGIN - now_ts,
+        )
+    return None
+
+
 class HistorySync:
-    """Per-entry history backfill orchestrator."""
+    """Per-entry history catch-up orchestrator."""
 
     def __init__(self, hass: HomeAssistant, entry: MeatPiConfigEntry) -> None:
         """Initialize the sync for one config entry."""
@@ -329,26 +541,51 @@ class HistorySync:
         self._store: Store[dict[str, Any]] = Store(
             hass, HISTORY_STORAGE_VERSION, f"{DOMAIN}.history_{entry.entry_id}",
         )
+        self._marks: list[_PageMark] = []
+        self._end_cursor: str | None = None
+        self._deferred_from: float | None = None
 
-    # -- watermark ---------------------------------------------------------
+    # -- the stored marks --------------------------------------------------
+
+    async def _async_load(self) -> dict[str, Any]:
+        data = await self._store.async_load()
+        return data if isinstance(data, dict) else {}
 
     async def async_get_watermark(self) -> float:
         """Return the newest timestamp already imported (0.0 = never)."""
-        data = await self._store.async_load()
-        if isinstance(data, dict):
-            watermark = _coerce_float(data.get("watermark"))
-            if watermark is not None and watermark > 0:
-                return watermark
+        watermark = _coerce_float((await self._async_load()).get("watermark"))
+        if watermark is not None and watermark > 0:
+            return watermark
         return 0.0
 
-    async def _async_save_watermark(self, watermark: float) -> None:
-        await self._store.async_save({"watermark": watermark})
+    async def async_get_cursor(self) -> str | None:
+        """Return the device read cursor of the last run (None = none)."""
+        cursor = (await self._async_load()).get("cursor")
+        return cursor if isinstance(cursor, str) and cursor else None
+
+    async def _async_save(self, watermark: float, cursor: str | None) -> None:
+        await self._store.async_save({"watermark": watermark, "cursor": cursor})
 
     async def async_remove(self) -> None:
-        """Delete the persisted watermark (config entry removed)."""
+        """Delete the persisted marks (config entry removed)."""
         await self._store.async_remove()
 
     # -- fetching ----------------------------------------------------------
+
+    @staticmethod
+    def _device_summary(status: dict[str, Any] | None) -> dict[str, Any] | None:
+        if not isinstance(status, dict):
+            return None
+        export = status.get("export")
+        return {
+            "logger": bool(status.get("enabled")),
+            "format": status.get("format"),
+            "autopid_log": status.get("autopid_log"),
+            "files": status.get("files"),
+            "storage_ok": status.get("storage_ok"),
+            "file": status.get("file"),
+            "export": export if isinstance(export, dict) else None,
+        }
 
     async def _async_fetch_export(
         self,
@@ -356,26 +593,93 @@ class HistorySync:
         since: float,
         result: HistorySyncResult,
     ) -> list[Any] | None:
-        """Fetch rows via the cursor export route; None when unsupported."""
-        rows: list[Any] = []
-        cursor = since
-        for _ in range(HISTORY_EXPORT_MAX_PAGES):
-            page = await api.async_export_log_rows(
-                cursor, HISTORY_EXPORT_PAGE_ROWS,
+        """Fetch rows via the cursor export route; None when unsupported.
+
+        The pull starts at the device cursor the last run saved (when it
+        can still name a place on the card), else at the time watermark
+        as a plain epoch (the device then starts at the file that was
+        being written at that moment), else at the oldest file.
+        """
+        status: dict[str, Any] | None = None
+        try:
+            status = await api.async_get_logger_status()
+        except MeatPiApiError as err:
+            _LOGGER.debug("History sync: no logger status (%s)", err)
+        result.device = self._device_summary(status)
+
+        stored = await self.async_get_cursor()
+        if stored is not None and not cursor_is_plausible(stored, status):
+            result.errors.append(
+                f"device cursor {stored} is past the file being written: "
+                "restarting from the time watermark",
             )
+            stored = None
+        start: str | None = stored
+        if start is None and since > 0:
+            start = str(int(since))
+
+        rows: list[Any] = []
+        self._marks = []
+        self._end_cursor = stored
+        # the device's clock journal: rows written before its clock was set
+        # or stepped (a dead RTC until the first time sync) carry the old
+        # clock; the journal names the files and the steps (firmware #984)
+        steps: dict[str, list[_ClockStep]] | None = None
+        for _ in range(HISTORY_EXPORT_MAX_PAGES):
+            page = await api.async_export_log_rows(start, HISTORY_EXPORT_PAGE_ROWS)
             if page is None:
                 return None
-            page_rows, next_since = page
-            rows.extend(page_rows)
-            if len(rows) >= HISTORY_MAX_ROWS_PER_SYNC:
+            if page.rows and steps is None:
+                steps = journal_steps_by_file(await api.async_get_clock_journal())
+            if steps:
+                for raw in page.rows:
+                    if rebase_row(raw, steps):
+                        result.rows_rebased += 1
+            if page.unsupported_format:
+                result.errors.append(
+                    "the device's parameter log is not JSON lines or CSV: "
+                    "nothing to catch up (set the logger format on the device)",
+                )
+                return rows
+            if page.cursor is None and page.rows:
+                # The device's answer was cut (no cursor line): nothing of
+                # this run is trusted, the stored cursor stays and a run a
+                # minute later reads the pages again. Firmware before
+                # 6.0.0-beta.8 glued a cut row to the cursor line on about
+                # one page in sixteen (bench run 5, 2026-11-06); importing
+                # the rows before the cut would seal a half-read hour.
+                result.pages += 1
+                result.errors.append(
+                    "export page without a cursor line (the device cut the "
+                    "answer; firmware before 6.0.0-beta.8 does so on about "
+                    "one page in sixteen): read again in a minute",
+                )
+                result.more_pending = True
+                self._marks = []
+                self._end_cursor = stored
+                return []
+            result.pages += 1
+            max_ts: float | None = None
+            for raw in page.rows:
+                ts = row_timestamp(raw)
+                if ts is not None and (max_ts is None or ts > max_ts):
+                    max_ts = ts
+            self._marks.append(_PageMark(start, max_ts))
+            rows.extend(page.rows)
+            if page.cursor is not None:
+                self._end_cursor = page.cursor
+            if not page.more:
                 break
-            if len(page_rows) < HISTORY_EXPORT_PAGE_ROWS:
-                break
-            if next_since is None or next_since <= cursor:
+            if page.cursor is None or page.cursor == start:
                 # Device did not advance the cursor; stop rather than loop.
                 result.errors.append("export cursor did not advance")
                 break
-            cursor = next_since
+            if len(rows) >= HISTORY_MAX_ROWS_PER_SYNC:
+                result.more_pending = True
+                break
+            start = page.cursor
+        else:
+            result.more_pending = True
         return rows
 
     @staticmethod
@@ -421,12 +725,13 @@ class HistorySync:
         api: MeatPiApiClient,
         result: HistorySyncResult,
     ) -> list[Any]:
-        """Fetch rows by downloading rotated log files (current firmware).
+        """Fetch rows by downloading rotated log files (no export route).
 
         The per-row time-window filter in :func:`aggregate_rows` enforces
         the watermark; this fetch only bounds volume.
         """
         status = await api.async_get_logger_status()
+        result.device = self._device_summary(status)
         log_dir = "/sd/logs"
         active_file: str | None = None
         if status is not None:
@@ -465,7 +770,7 @@ class HistorySync:
         entity_ids: set[str],
         start: datetime,
     ) -> dict[str, set[int]]:
-        """Return hours that already have statistics per entity (live wins)."""
+        """Return hours that already have statistics per entity."""
         stats = await get_instance(self._hass).async_add_executor_job(
             statistics_during_period,
             self._hass,
@@ -499,7 +804,7 @@ class HistorySync:
         """Build import metadata for an entity, reusing existing stats metadata.
 
         Returns None when the entity's existing statistics are incompatible
-        (sum-type) — importing mean rows there would corrupt them.
+        (sum-type): importing mean rows there would corrupt them.
         """
         metadata_map = await get_instance(self._hass).async_add_executor_job(
             partial(get_metadata, self._hass, statistic_ids={entity_id}),
@@ -555,6 +860,10 @@ class HistorySync:
             resolved[name] = (entity_id, unit)
         return resolved
 
+    def _prefer_live(self) -> bool:
+        options = getattr(self._entry, "options", None) or {}
+        return bool(options.get(CONF_HISTORY_PREFER_LIVE, DEFAULT_HISTORY_PREFER_LIVE))
+
     # -- the sync ----------------------------------------------------------
 
     async def _async_import_buckets(
@@ -571,11 +880,15 @@ class HistorySync:
         every import succeeded). The watermark must never pass
         ``failed_floor``, or the failed hours would be unrecoverable.
         Permanently incompatible entities (sum-type statistics) do not
-        hold the watermark — retrying cannot fix them.
+        hold the watermark: retrying cannot fix them.
 
         Each PID is isolated: one failing import never blocks the others.
-        Hours that already have live statistics are skipped (live wins).
+        Hours that already have live statistics are replaced by the
+        recorded ones (the log is the complete record of that hour) unless
+        the entry prefers the live statistics, in which case they are
+        skipped.
         """
+        prefer_live = self._prefer_live()
         max_imported_ts = 0.0
         failed_floor: float | None = None
         for name, (entity_id, unit) in resolved.items():
@@ -583,10 +896,13 @@ class HistorySync:
             pending: list[int] = []
             statistics = []
             skipped_hours = 0
+            overwritten = 0
             for hour, bucket in sorted(buckets[name].items()):
                 if hour in taken:
-                    skipped_hours += 1
-                    continue
+                    if prefer_live:
+                        skipped_hours += 1
+                        continue
+                    overwritten += 1
                 pending.append(hour)
                 statistics.append(
                     {
@@ -617,6 +933,7 @@ class HistorySync:
                 continue
             result.pids_imported += 1
             result.hours_imported += len(statistics)
+            result.hours_overwritten_live += overwritten
             last_hour_end = max(hour for hour in buckets[name]) + 3600
             max_imported_ts = max(max_imported_ts, last_hour_end)
         return max_imported_ts, failed_floor
@@ -645,6 +962,15 @@ class HistorySync:
         if not raw_rows:
             return None
 
+        current_hour = int(now_ts // 3600) * 3600
+        self._deferred_from = None
+        for raw in raw_rows:
+            ts = row_timestamp(raw)
+            if ts is not None and ts >= since and _deferred(
+                ts, now_ts=now_ts, current_hour=current_hour,
+            ) and (self._deferred_from is None or ts < self._deferred_from):
+                self._deferred_from = ts
+
         buckets = aggregate_rows(
             raw_rows, since=since, now_ts=now_ts, result=result,
         )
@@ -657,8 +983,22 @@ class HistorySync:
             return None
         return resolved, buckets
 
+    def _cursor_to_save(self, hold_ts: float | None) -> str | None:
+        """The device cursor the next run starts from.
+
+        Rows at or after ``hold_ts`` (the earliest deferred row, a failed
+        PID's first hour) must be read again: the cursor rolls back to
+        the start of the first page that carried such a row. With nothing
+        to hold, the pull continues where the device stopped.
+        """
+        if hold_ts is not None:
+            for mark in self._marks:
+                if mark.max_ts is not None and mark.max_ts >= hold_ts:
+                    return mark.start_cursor
+        return self._end_cursor
+
     async def async_sync(self) -> HistorySyncResult:
-        """Run one backfill pass. Never raises."""
+        """Run one catch-up pass. Never raises."""
         result = HistorySyncResult()
         runtime = getattr(self._entry, "runtime_data", None)
         api = getattr(runtime, "api", None)
@@ -671,6 +1011,7 @@ class HistorySync:
 
         collected = await self._async_collect(api, since, now_ts, result)
         if collected is None:
+            await self._async_finish(result, watermark, watermark, None, now_ts)
             return result
         resolved, buckets = collected
 
@@ -682,7 +1023,7 @@ class HistorySync:
                 {entity_id for entity_id, _ in resolved.values()},
                 dt_util.utc_from_timestamp(earliest_hour),
             )
-        except Exception as err:  # recorder unavailable — never break setup
+        except Exception as err:  # recorder unavailable: never break setup
             _LOGGER.warning("History sync: cannot query recorder: %s", err)
             result.errors.append(f"recorder query failed: {err}")
             return result
@@ -696,37 +1037,83 @@ class HistorySync:
             # A failed PID's hours must stay ahead of the watermark so
             # the next sync re-fetches and re-imports them (idempotent).
             new_watermark = min(new_watermark, failed_floor)
+        if not result.pids_imported or new_watermark <= watermark:
+            new_watermark = watermark
 
-        if result.pids_imported and new_watermark > watermark:
-            result.watermark = new_watermark
-            try:
-                await self._async_save_watermark(new_watermark)
-            except Exception as err:  # storage failure only re-syncs later
-                _LOGGER.warning("History sync: watermark save failed: %s", err)
-                result.errors.append(f"watermark save failed: {err}")
+        await self._async_finish(result, watermark, new_watermark, failed_floor, now_ts)
 
         _LOGGER.info(
-            "History sync for %s (%s): %d rows -> %d hour(s) across %d "
-            "sensor(s); %d hour(s) already recorded live; %d row(s) rejected",
+            "History sync for %s (%s): %d rows in %d page(s) -> %d hour(s) "
+            "across %d sensor(s); %d row(s) of the current hour deferred; "
+            "%d row(s) rejected%s",
             self._entry.title,
             result.source,
             result.rows_fetched,
+            result.pages,
             result.hours_imported,
             result.pids_imported,
-            result.hours_skipped_existing,
+            result.rows_deferred,
             result.rows_rejected,
+            f"; follow-up in {result.followup_in:.0f} s"
+            if result.followup_in else "",
         )
         return result
+
+    async def _async_finish(
+        self,
+        result: HistorySyncResult,
+        old_watermark: float,
+        new_watermark: float,
+        failed_floor: float | None,
+        now_ts: float,
+    ) -> None:
+        """Save the marks a run earned and say when to come back."""
+        result.finished_at = now_ts
+        if not result.ran:
+            return
+        if result.source != "export":
+            # The file path has no cursor; the time watermark is the mark.
+            if result.pids_imported and new_watermark > old_watermark:
+                result.watermark = new_watermark
+                await self._async_save_marks(new_watermark, None, result)
+            result.followup_in = followup_delay(result, now_ts)
+            return
+
+        hold_candidates = [
+            ts for ts in (self._deferred_from, failed_floor) if ts is not None
+        ]
+        # Hours the row cap cut short stay ahead of the watermark: read
+        # them again from the watermark on.
+        if result.more_pending and result.rows_used >= HISTORY_MAX_ROWS_PER_SYNC:
+            hold_candidates.append(new_watermark)
+        hold_ts = min(hold_candidates) if hold_candidates else None
+        cursor = self._cursor_to_save(hold_ts)
+        result.cursor = cursor
+        result.followup_in = followup_delay(result, now_ts)
+        stored_cursor = await self.async_get_cursor()
+        if result.watermark is None and new_watermark > old_watermark:
+            result.watermark = new_watermark
+        if new_watermark != old_watermark or cursor != stored_cursor:
+            await self._async_save_marks(new_watermark, cursor, result)
+
+    async def _async_save_marks(
+        self, watermark: float, cursor: str | None, result: HistorySyncResult,
+    ) -> None:
+        try:
+            await self._async_save(watermark, cursor)
+        except Exception as err:  # storage failure only re-syncs later
+            _LOGGER.warning("History sync: saving the marks failed: %s", err)
+            result.errors.append(f"watermark save failed: {err}")
 
 
 async def async_sync_history(
     hass: HomeAssistant,
     entry: MeatPiConfigEntry,
 ) -> HistorySyncResult:
-    """Run one history backfill pass for a config entry. Never raises."""
+    """Run one history catch-up pass for a config entry. Never raises."""
     try:
         return await HistorySync(hass, entry).async_sync()
-    except Exception:  # Defensive: backfill must never break anything else.
+    except Exception:  # Defensive: the catch-up must never break anything else.
         _LOGGER.exception("Unexpected error during history sync")
         return HistorySyncResult()
 
@@ -735,5 +1122,5 @@ async def async_remove_history_store(
     hass: HomeAssistant,
     entry: MeatPiConfigEntry,
 ) -> None:
-    """Delete the watermark store when the config entry is removed."""
+    """Delete the marks store when the config entry is removed."""
     await HistorySync(hass, entry).async_remove()
