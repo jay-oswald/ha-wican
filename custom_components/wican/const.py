@@ -45,3 +45,10 @@ GITHUB_RELEASES_UPDATE_INTERVAL = 3600  # 1 hour
 
 # WiCAN Data Coordinator (push-based fallback polling)
 WICAN_DATA_UPDATE_INTERVAL = 300  # seconds (5 minutes)
+
+# "Reporting" binary sensor: how long to wait after the last webhook push
+# before considering the device's data stale, relative to its own post
+# interval. Floored so a short post_interval (e.g. 1s, for testing) doesn't
+# make the sensor flap on ordinary network jitter.
+REPORTING_STALE_MULTIPLIER = 3
+REPORTING_MIN_TIMEOUT = 120  # seconds

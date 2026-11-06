@@ -1,6 +1,9 @@
 from dataclasses import dataclass, field
 
-from homeassistant.components.binary_sensor import BinarySensorEntityDescription
+from homeassistant.components.binary_sensor import (
+    BinarySensorDeviceClass,
+    BinarySensorEntityDescription,
+)
 from homeassistant.components.sensor import SensorDeviceClass, SensorEntityDescription
 from homeassistant.helpers.entity import EntityCategory
 
@@ -78,6 +81,16 @@ BINARY_SENSOR_DESCRIPTIONS: tuple[WiCANBinarySensorEntityDescription, ...] = (
             "obd_chip_status",
         ],
     ),
+)
+
+# Not part of BINARY_SENSOR_DESCRIPTIONS: it isn't a status key from the
+# device payload, so the generic WiCANBinarySensorEntity has nothing to read
+# for it. See WiCANReportingBinarySensorEntity in binary_sensor.py.
+REPORTING_BINARY_SENSOR_DESCRIPTION = WiCANBinarySensorEntityDescription(
+    key="reporting",
+    translation_key="reporting",
+    device_class=BinarySensorDeviceClass.CONNECTIVITY,
+    entity_category=EntityCategory.DIAGNOSTIC,
 )
 
 def get_sensor_attributes(entity_description, data: dict) -> dict:
