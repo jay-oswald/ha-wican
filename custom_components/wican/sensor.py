@@ -16,6 +16,7 @@ from .attributes import SENSOR_DESCRIPTIONS, WiCANSensorEntityDescription, get_s
 from .const import DOMAIN
 from .entity import WiCANEntity
 from .param_loader import (
+    _infer_device_class_from_unit,
     get_param_device_class,
     get_param_icon,
     get_param_unit,
@@ -99,12 +100,26 @@ def _normalize_device_class(
     Returns:
         Valid SensorDeviceClass enum or None.
     """
-    # Handle "none" string as None
-    if isinstance(device_class, str) and device_class.lower() == "none":
+    # Handle "none" or empty string as None
+    if isinstance(device_class, str) and device_class.lower() in ("none", ""):
         device_class = None
 
-    # Try to get fallback from params.json if no class provided
+    # Vehicle profiles on the device carry the same overloaded "battery" class
+    # as params.json (e.g. LV_V / HV_C_V_* with class="battery" and unit="V").
+    dc_name = (
+        device_class.value
+        if isinstance(device_class, SensorDeviceClass)
+        else device_class
+    )
+    if (
+        isinstance(dc_name, str)
+        and dc_name.lower() == "battery"
+        and unit
+        and unit.strip() != "%"
+    ):
+        device_class = _infer_device_class_from_unit(unit)
     if device_class is None and pid_key:
+        # Try to get fallback from params.json if no class provided
         device_class = get_param_device_class(pid_key)
 
     # Validate the device class is known to Home Assistant
