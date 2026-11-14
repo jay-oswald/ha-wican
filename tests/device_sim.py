@@ -382,6 +382,10 @@ class SimulatedDeviceApi:
         # Hosts that no longer answer (e.g. the car left home: the LAN
         # address dies while the VPN address keeps working).
         self.unreachable_hosts: set[str] = set()
+        # An odd answer on /api/webhook for one method ("GET", "DELETE"):
+        # the keyword arguments of the mock response served instead of
+        # the firmware's own answer.
+        self.webhook_answers: dict[str, dict[str, Any]] = {}
         self._aioclient_mock = aioclient_mock
 
         for base in base_urls:
@@ -471,6 +475,10 @@ class SimulatedDeviceApi:
     ) -> AiohttpClientMockResponse:
         """Serve /api/webhook from the simulated firmware's settings."""
         verb = method.upper()
+        if verb in self.webhook_answers:
+            return AiohttpClientMockResponse(
+                method, url, **self.webhook_answers[verb],
+            )
         if verb == "POST":
             status, body = firmware.register(data)
             return self._json(method, url, body, status=status)

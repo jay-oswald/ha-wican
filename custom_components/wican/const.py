@@ -253,4 +253,9 @@ MAX_PID_CONFIG_FIELD_LENGTH = 64
 # A PID's value is computed on the device (B3*100/255): three decimals keep
 # every reading a car gives and spare the state 13 digits of arithmetic.
 PID_VALUE_DECIMALS = 3
+
+# Asking the device of a removed entry to stop posting: every address of
+# the device together, and the largest answer read from it.
+WEBHOOK_RELEASE_TIMEOUT = 10  # seconds
+WEBHOOK_SETTINGS_MAX_BYTES = 16384
 MAX_DEVICE_INFO_FIELD_LENGTH = 255

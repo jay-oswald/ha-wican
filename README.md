@@ -416,8 +416,17 @@ This integration follows standard Home Assistant removal:
 3. Repeat for any additional devices.
 
 Removing the config entry unregisters the Home Assistant webhook and removes all
-entities. Optionally, open the WiCAN device's web UI and disable its webhook
-(Settings → Services → Automation → Webhooks) so it stops sending data.
+entities. A device on firmware V6 that Home Assistant can reach at that moment is
+told to stop: the integration clears the webhook on the device when it still
+points to this entry. These keep sending data, because Home Assistant answers a
+post to a webhook it no longer knows as if it had taken it:
+
+- a device that is asleep or away when the entry is removed,
+- a device on firmware 4.x,
+- a device whose webhook is pinned on the device (Manual URL override).
+
+For these, open the WiCAN device's web UI and disable its webhook (Settings →
+Services → Automation → Webhooks).
 
 ## For developers
 

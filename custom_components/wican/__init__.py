@@ -71,10 +71,12 @@ from .const import (
     SIGNAL_CAPABILITIES_UPDATED,
     WEBHOOK_MAX_RETRIES,
     WEBHOOK_REGISTRATION_TIMEOUT,
+    WEBHOOK_RELEASE_TIMEOUT,
     WEBHOOK_RETRY_DELAY_BASE,
     WEBHOOK_REV_KEY,
     WEBHOOK_REV_LENGTH,
     WEBHOOK_REV_MAX_LENGTH,
+    WEBHOOK_SETTINGS_MAX_BYTES,
 )
 from .coordinator import MeatPiDataUpdateCoordinator
 from .devices import (
@@ -86,7 +88,11 @@ from .devices import (
 )
 from .exceptions import MeatPiApiError, MeatPiWebhookError
 from .github_releases import GitHubReleasesCoordinator, hardware_stream
-from .helpers import NoPlainHttpURLError, resolve_device_webhook_urls
+from .helpers import (
+    NoPlainHttpURLError,
+    async_read_capped,
+    resolve_device_webhook_urls,
+)
 from .history import async_remove_history_store, async_sync_history
 from .models import MeatPiRuntimeData
 from .param_loader import async_update_params_from_github
@@ -1238,6 +1244,121 @@ async def async_remove_entry(
     """Clean up persisted state when a config entry is removed for good."""
     ir.async_delete_issue(hass, DOMAIN, _firmware_repair_issue_id(entry))
     await async_remove_history_store(hass, entry)
+    # Not awaited: the device may be asleep, and removing the entry must
+    # not wait for a connection attempt to give up.
+    hass.async_create_task(
+        _async_release_device_webhook(hass, entry),
+        f"{DOMAIN} release device webhook {entry.entry_id}",
+    )
+
+
+def _stored_device_base_urls(entry: MeatPiConfigEntry) -> list[str]:
+    """Return the device's addresses as the entry stores them, local first.
+
+    For an entry that is no longer loaded (it has no runtime data).
+    """
+    candidates = (
+        entry.data.get("host"),
+        entry.data.get("mdns"),
+        _http_url_from_host(_validated_vpn_ip(entry.data.get("vpn_ip"))),
+    )
+    unique: list[str] = []
+    for candidate in candidates:
+        if isinstance(candidate, str) and candidate and candidate not in unique:
+            unique.append(candidate)
+    return unique
+
+
+def _settings_name_webhook(settings: dict[str, Any], webhook_id: str) -> bool:
+    """Return True when a device's webhook settings post to this webhook."""
+    urls: list[Any] = [settings.get("url")]
+    more = settings.get("urls")
+    if isinstance(more, list):
+        urls.extend(more)
+    path = f"/api/webhook/{webhook_id}"
+    return any(isinstance(url, str) and url.endswith(path) for url in urls)
+
+
+async def _async_release_webhook_at(
+    session: Any, endpoint: URL, webhook_id: str,
+) -> bool | None:
+    """Clear the device's webhook at one address when it is still this one.
+
+    True: cleared. False: the device answered and keeps its settings.
+    None: no usable answer at this address, another one may give it.
+    """
+    response = await session.get(str(endpoint))
+    body = await async_read_capped(response, WEBHOOK_SETTINGS_MAX_BYTES)
+    if response.status != HTTPStatus.OK or body is None:
+        return None
+    settings = json_loads(body)
+    if not isinstance(settings, dict):
+        return None
+    if not _settings_name_webhook(settings, webhook_id):
+        _LOGGER.debug(
+            "The device at %s posts elsewhere by now; its webhook is left alone",
+            endpoint,
+        )
+        return False
+    if settings.get("manual_override") is True:
+        _LOGGER.info(
+            "The webhook is pinned on the device at %s (manual override): "
+            "it keeps posting until it is switched off there",
+            endpoint,
+        )
+        return False
+    response = await session.delete(str(endpoint))
+    await response.read()
+    if response.status >= HTTPStatus.MULTIPLE_CHOICES:
+        return None
+    _LOGGER.info("Device webhook cleared at %s: the device stops posting", endpoint)
+    return True
+
+
+async def _async_release_device_webhook(
+    hass: HomeAssistant, entry: MeatPiConfigEntry,
+) -> bool:
+    """Ask the device of a removed entry to stop posting to its webhook.
+
+    Home Assistant answers a post to a webhook it no longer knows with
+    200, so the device went on posting for good and counted every post
+    as delivered. The device is asked for its settings first and is left
+    alone unless they still name this entry's webhook: it may post to
+    another Home Assistant by now, or to an entry added again since. A
+    webhook pinned on the device (manual override) is the user's own.
+
+    Best effort, never raises: a device that is asleep or away cannot be
+    told. It posts until it is registered again or its webhook is
+    switched off in its own web interface.
+    """
+    webhook_id = entry.data.get(CONF_WEBHOOK_ID)
+    if not isinstance(webhook_id, str) or not webhook_id:
+        return False
+    session = async_get_clientsession(hass)
+    try:
+        async with asyncio.timeout(WEBHOOK_RELEASE_TIMEOUT):
+            for base in _stored_device_base_urls(entry):
+                endpoint = _build_webhook_endpoint(base)
+                if endpoint is None:
+                    continue
+                try:
+                    released = await _async_release_webhook_at(
+                        session, endpoint, webhook_id,
+                    )
+                except (ClientError, TimeoutError, ValueError) as err:
+                    _LOGGER.debug("No answer about the webhook at %s: %r", endpoint, err)
+                    continue
+                if released is not None:
+                    return released
+    except TimeoutError:
+        _LOGGER.debug("The device of the removed entry %s did not answer in time", entry.title)
+    _LOGGER.info(
+        "The device of the removed entry %s could not be reached: it keeps "
+        "posting until it is registered again or its webhook is switched off "
+        "in its own web interface",
+        entry.title,
+    )
+    return False
 
 
 async def async_remove_config_entry_device(
