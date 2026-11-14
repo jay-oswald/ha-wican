@@ -78,7 +78,8 @@ WiCAN does not poll the vehicle from Home Assistant. Instead, the device
 If the device stops pushing (for example the car is parked and the adapter is in
 sleep mode), the entities are marked **unavailable** after several missed
 intervals, and become available again on the next push. A repair issue is raised
-if Home Assistant cannot register its webhook on the device at all.
+when Home Assistant cannot reach the device to register its webhook and the
+device is not sending data either; it closes by itself with the next push.
 
 If you would rather keep seeing the last readings while the device is away, turn
 on **Keep the last values while the device is offline** for that device (see
@@ -110,6 +111,29 @@ Two behaviors help devices on the road:
   as a backup when the local address stops answering — control buttons and
   history sync keep working while the car is away, provided Home Assistant
   can route into the VPN network.
+
+### When Home Assistant cannot reach the device
+
+A car that is asleep when Home Assistant starts, or one on LTE without a VPN,
+cannot be reached by Home Assistant, but it reaches Home Assistant with every
+push. The webhook addresses and the **Post Interval** then travel the other way:
+
+- **Firmware that reads push replies** (WiCAN-Pro `6.0.0-beta.11` and newer):
+  Home Assistant puts the settings into its reply to the device's own push. A
+  changed Post Interval arrives with the next push, wherever the car is.
+- **Older firmware:** Home Assistant registers again when the device pushes, at
+  most once every five minutes, so the settings arrive once the device can be
+  reached.
+
+A device takes settings from a reply only where the connection can be trusted:
+over HTTPS to a host name, or to a private address on a network that is not
+marked untrusted on the device. Otherwise it keeps what it has until it is home
+again. A device whose webhook is pinned on the device itself (**Manual URL
+override** on its *Home Assistant* card) keeps its own settings, and Home
+Assistant sends it none.
+
+Settings changed on the device itself (its web interface) are put back to the
+ones from Home Assistant with the next push, unless the webhook is pinned.
 
 ## Installation
 

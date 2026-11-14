@@ -8,6 +8,8 @@ from homeassistant.components.diagnostics import async_redact_data
 from homeassistant.const import CONF_WEBHOOK_ID
 from homeassistant.helpers import entity_registry as er
 
+from .const import CONF_READS_PUSH_REPLY
+
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
 
@@ -49,6 +51,26 @@ def _history_sync_diagnostics(config_entry: MeatPiConfigEntry) -> dict[str, Any]
         "followup_due": runtime.history_followup_due,
         "finished_at": result.finished_at,
         "device": result.device,
+    }
+
+
+def _push_reply_diagnostics(config_entry: MeatPiConfigEntry) -> dict[str, Any]:
+    """Summarize the settings handed to the device in push replies.
+
+    A revision is a short hash of one set of webhook settings: it names
+    the set without giving away the webhook address in it.
+    """
+    runtime = config_entry.runtime_data
+    state = runtime.push_reply
+    return {
+        "device_reads_replies": bool(
+            config_entry.data.get(CONF_READS_PUSH_REPLY),
+        ),
+        "reported_revision": state.reported_rev,
+        "wanted_revision": state.wanted_rev,
+        "reply_bodies_sent": state.bodies_sent,
+        "last_reply_body": state.last_body_at,
+        "registration_failed": runtime.registration_failed,
     }
 
 
@@ -103,6 +125,7 @@ async def async_get_config_entry_diagnostics(
             "components": sorted(config_entry.runtime_data.capabilities.components),
         },
         "history_sync": _history_sync_diagnostics(config_entry),
+        "push_reply": _push_reply_diagnostics(config_entry),
         "runtime_data": {
             "webhook_id": "**REDACTED**",
             "post_interval": config_entry.runtime_data.post_interval,

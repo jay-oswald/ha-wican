@@ -12,6 +12,7 @@ from homeassistant.setup import async_setup_component
 
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
+from custom_components.wican import _async_register_webhook_on_device
 from custom_components.wican.api import LEGACY_CAPABILITIES
 from custom_components.wican.const import DOMAIN, CONF_POST_INTERVAL
 
@@ -65,6 +66,16 @@ def mock_capability_probe() -> Generator[MagicMock]:
         client_cls.return_value = AsyncMock()
         client_cls.return_value.async_probe.return_value = LEGACY_CAPABILITIES
         yield client_cls
+
+
+@pytest.fixture
+def one_registration_attempt(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Give the real webhook registration a single attempt.
+
+    A failed registration sleeps through a backoff between its attempts;
+    a test that lets the real registration fail has no reason to wait.
+    """
+    monkeypatch.setattr(_async_register_webhook_on_device, "__defaults__", (1,))
 
 
 @pytest.fixture

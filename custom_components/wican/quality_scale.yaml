@@ -203,7 +203,8 @@ rules:
     status: done
     comment: >
       A repair issue is raised when webhook registration fails after all
-      retries and cleared on the next successful registration or on unload.
+      retries and the device is not pushing either; it is cleared on the
+      next successful registration, on the next push or on unload.
       A second one (https_only_server) says that a device without TLS
       (WiCAN OBD, WiCAN USB) cannot push to a Home Assistant whose own web
       server has SSL on; it clears once a plain-http address exists again

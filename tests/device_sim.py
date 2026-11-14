@@ -132,6 +132,193 @@ DEVICE_PRESETS: dict[str, dict[str, Any]] = {
 }
 
 
+class SimulatedWebhookFirmware:
+    """The webhook settings a simulated device holds, and how its firmware treats them.
+
+    ``reads_replies`` picks the firmware generation. False is every firmware
+    before settings in the push reply: it reports no revision and ignores
+    whatever Home Assistant answers. True is a firmware that reports
+    ``status.webhook_rev`` in every push, applies the ``webhook`` object of
+    a 200 reply and stores the ``rev`` of a registration.
+
+    ``trusts_replies`` is the device's own verdict on the path a reply came
+    in on (False: plain http to a public address, a Wi-Fi network marked
+    untrusted). ``pinned`` is the user's ``manual_override`` on the device:
+    it ignores a registration and a reply, and reports no revision.
+    """
+
+    URL_MAX = 191
+    REPLY_MAX = 2048
+    REV_MAX = 16
+    _REV_CHARS = frozenset(
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-",
+    )
+
+    def __init__(self, *, reads_replies: bool = False) -> None:
+        self.reads_replies = reads_replies
+        self.trusts_replies = True
+        self.pinned = False
+        self.url = ""
+        self.urls: list[str] = []
+        self.enabled = False
+        self.interval = 60
+        self.rev = ""
+        # Every registration body the device was sent, in order.
+        self.registrations: list[dict[str, Any]] = []
+        self.replies_applied = 0
+        # The verdict on every reply that carried a body, in order.
+        self.reply_verdicts: list[str] = []
+
+    def reported_rev(self) -> str | None:
+        """The revision this device puts in a push, None when it sends none."""
+        if not self.reads_replies or self.pinned:
+            return None
+        return self.rev
+
+    def changed_on_device(self, **fields: Any) -> None:
+        """Change the webhook settings in the device's own web interface."""
+        for key, value in fields.items():
+            setattr(self, key, value)
+        self.rev = ""
+
+    def _url_ok(self, value: Any) -> bool:
+        return (
+            isinstance(value, str)
+            and value.startswith(("http://", "https://"))
+            and len(value) <= self.URL_MAX
+        )
+
+    def _rev_ok(self, value: Any) -> bool:
+        return (
+            isinstance(value, str)
+            and 0 < len(value) <= self.REV_MAX
+            and set(value) <= self._REV_CHARS
+        )
+
+    def _strict_settings(self, body: Any) -> dict[str, Any] | None:
+        """Validate a registration object as the firmware does with a ``rev``."""
+        if not isinstance(body, dict):
+            return None
+        urls = body.get("urls", [body.get("url")])
+        interval = body.get("interval")
+        enabled = body.get("enabled", True)
+        valid = (
+            self._rev_ok(body.get("rev"))
+            and self._url_ok(body.get("url"))
+            and isinstance(urls, list)
+            and 0 < len(urls) <= 2
+            and urls[0] == body["url"]
+            and all(self._url_ok(item) for item in urls)
+            and isinstance(interval, int)
+            and not isinstance(interval, bool)
+            and 1 <= interval <= 3600
+            and isinstance(enabled, bool)
+        )
+        if not valid:
+            return None
+        return {
+            "url": body["url"],
+            "urls": list(urls),
+            "enabled": enabled,
+            "interval": interval,
+            "rev": body["rev"],
+        }
+
+    def _store(self, settings: dict[str, Any]) -> None:
+        self.url = settings["url"]
+        self.urls = settings["urls"]
+        self.enabled = settings["enabled"]
+        self.interval = settings["interval"]
+        self.rev = settings["rev"]
+
+    def shape(self) -> dict[str, Any]:
+        """The body of ``GET /api/webhook`` (and of a registration's answer)."""
+        body: dict[str, Any] = {
+            "url": self.url,
+            "enabled": self.enabled,
+            "interval": self.interval,
+            "manual_override": self.pinned,
+        }
+        if len(self.urls) > 1:
+            body["urls"] = list(self.urls)
+        if self.reads_replies:
+            body["rev"] = self.reported_rev() or ""
+        return body
+
+    def register(self, body: Any) -> tuple[int, dict[str, Any]]:
+        """Take a ``POST /api/webhook`` body: (status, answer body)."""
+        if not isinstance(body, dict):
+            return 400, {"error": "json"}
+        self.registrations.append(dict(body))
+        if self.pinned and "manual_override" not in body:
+            return 200, self.shape()
+        first = not self.url
+        if self.reads_replies and "rev" in body:
+            settings = self._strict_settings(body)
+            if settings is None:
+                return 400, {"error": "invalid"}
+            self._store(settings)
+            return (201 if first else 200), self.shape()
+        if not self._url_ok(body.get("url")):
+            return 400, {"error": "url"}
+        urls = body.get("urls")
+        interval = body.get("interval")
+        self._store(
+            {
+                "url": body["url"],
+                "urls": list(urls) if isinstance(urls, list) else [body["url"]],
+                "enabled": body.get("enabled", True) is True,
+                # Out of range or missing: the firmware keeps what it has.
+                "interval": interval
+                if isinstance(interval, int) and 1 <= interval <= 3600
+                else self.interval,
+                "rev": "",
+            },
+        )
+        return (201 if first else 200), self.shape()
+
+    def take_reply(self, status: int, body: bytes) -> str:
+        """Treat the reply to a push as the firmware does; returns the verdict.
+
+        ``none`` is a reply without settings (no body, not a 200, no
+        ``webhook`` object) or a firmware that does not read replies.
+        Every other verdict is kept in :attr:`reply_verdicts`.
+        """
+        if not self.reads_replies or status != 200 or not body:
+            return "none"
+        verdict = self._judge_reply(body)
+        if verdict != "none":
+            self.reply_verdicts.append(verdict)
+        return verdict
+
+    def _judge_reply(self, body: bytes) -> str:
+        if len(body) > self.REPLY_MAX:
+            return "too_long"
+        try:
+            parsed = json.loads(body)
+        except ValueError:
+            parsed = None
+        if not isinstance(parsed, dict):
+            return "not_json"
+        if "webhook" not in parsed:
+            return "none"
+        return self._apply_reply(parsed["webhook"])
+
+    def _apply_reply(self, webhook: Any) -> str:
+        if self.pinned:
+            return "pinned"
+        if not self.trusts_replies:
+            return "untrusted"
+        settings = self._strict_settings(webhook)
+        if settings is None:
+            return "invalid"
+        if settings["rev"] == self.rev:
+            return "same"
+        self._store(settings)
+        self.replies_applied += 1
+        return "applied"
+
+
 class SimulatedDeviceApi:
     """The device-side HTTP API, wired into the aiohttp mocker.
 
@@ -158,7 +345,10 @@ class SimulatedDeviceApi:
         components: tuple[str, ...] = V6_COMPONENTS_FULL,
         fw_version: str = "6.0.1",
         mode: str = "ok",
+        firmware: SimulatedWebhookFirmware | None = None,
     ) -> None:
+        # The device's webhook settings: /api/webhook is served from them.
+        self.firmware = firmware
         self.api_level = api_level
         self.components = list(components)
         self.fw_version = fw_version
@@ -268,7 +458,26 @@ class SimulatedDeviceApi:
                 headers={"Content-Type": "text/html"},
             )
 
+        if self.firmware is not None and url.path == "/api/webhook":
+            return self._webhook(self.firmware, method, url, data)
         return self._route(method, url)
+
+    def _webhook(
+        self,
+        firmware: SimulatedWebhookFirmware,
+        method: str,
+        url: URL,
+        data: Any,
+    ) -> AiohttpClientMockResponse:
+        """Serve /api/webhook from the simulated firmware's settings."""
+        verb = method.upper()
+        if verb == "POST":
+            status, body = firmware.register(data)
+            return self._json(method, url, body, status=status)
+        if verb == "DELETE":
+            firmware.changed_on_device(url="", urls=[], enabled=False)
+            return AiohttpClientMockResponse(method, url, status=204)
+        return self._json(method, url, firmware.shape())
 
     def _route(self, method: str, url: URL) -> AiohttpClientMockResponse:
         path = url.path
@@ -463,6 +672,7 @@ class MeatPiDeviceSimulator:
         ip: str = "192.168.1.123",
         status_fields: dict[str, Any] | None = None,
         omit_obd_fields: bool = False,
+        reads_replies: bool = False,
     ) -> None:
         self.hass = hass
         self._client_factory = hass_client_factory
@@ -479,6 +689,11 @@ class MeatPiDeviceSimulator:
         self.omit_obd_fields = omit_obd_fields
         self.entry: MockConfigEntry | None = None
         self.api: SimulatedDeviceApi | None = None
+        # The webhook settings this device holds. ``reads_replies`` makes it
+        # a firmware that reports a settings revision and reads push replies.
+        self.firmware = SimulatedWebhookFirmware(reads_replies=reads_replies)
+        # What the firmware made of the reply to the last push.
+        self.last_reply = "none"
         self._preset_api_kwargs: dict[str, Any] = {}
 
     @classmethod
@@ -507,7 +722,10 @@ class MeatPiDeviceSimulator:
         Must be called *before* :meth:`async_setup` so the integration's real
         setup-time capability probe finds the routes registered.
         """
-        kwargs: dict[str, Any] = {"fw_version": self.fw_version}
+        kwargs: dict[str, Any] = {
+            "fw_version": self.fw_version,
+            "firmware": self.firmware,
+        }
         kwargs.update(self._preset_api_kwargs)
         kwargs.update(overrides)
         self.api = SimulatedDeviceApi(
@@ -526,12 +744,17 @@ class MeatPiDeviceSimulator:
         register_result: bool = True,
         options: dict[str, Any] | None = None,
         device_type: str | None = None,
+        real_registration: bool = False,
     ) -> MockConfigEntry:
         """Create the config entry and set up the integration.
 
         ``device_type`` simulates an entry created from a discovery that
         carried a device_type TXT record (new firmware); without it the
         integration infers the type from the hardware version.
+
+        ``real_registration`` lets the integration's own registration run
+        against the simulated device API (:meth:`attach_api` first) instead
+        of a stub that returns ``register_result``.
         """
         data: dict[str, Any] = {
             CONF_WEBHOOK_ID: self.webhook_id,
@@ -562,6 +785,11 @@ class MeatPiDeviceSimulator:
             minor_version=2,
         )
         self.entry.add_to_hass(self.hass)
+
+        if real_registration:
+            assert await self.hass.config_entries.async_setup(self.entry.entry_id)
+            await self.hass.async_block_till_done()
+            return self.entry
 
         with patch(
             "custom_components.wican._async_register_webhook_on_device",
@@ -602,10 +830,15 @@ class MeatPiDeviceSimulator:
         url = f"/api/webhook/{self.webhook_id}"
         if raw is not None:
             all_headers = {"Content-Type": content_type, **(headers or {})}
-            return await self._client.post(url, data=raw, headers=all_headers)
-        if headers is not None:
-            return await self._client.post(url, json=payload, headers=headers)
-        return await self._client.post(url, json=payload)
+            resp = await self._client.post(url, data=raw, headers=all_headers)
+        elif headers is not None:
+            resp = await self._client.post(url, json=payload, headers=headers)
+        else:
+            resp = await self._client.post(url, json=payload)
+        if self.firmware.reads_replies:
+            # The firmware reads the reply to its own push.
+            self.last_reply = self.firmware.take_reply(resp.status, await resp.read())
+        return resp
 
     async def push_and_settle(self, payload: Any) -> Any:
         """Push a payload and let all resulting tasks run."""
@@ -724,6 +957,9 @@ class MeatPiDeviceSimulator:
         base.update(self.status_fields)
         if self.device_id:
             base["device_id"] = self.device_id
+        reported_rev = self.firmware.reported_rev()
+        if reported_rev is not None:
+            base["webhook_rev"] = reported_rev
         base.update(fields)
         return {"status": base}
 

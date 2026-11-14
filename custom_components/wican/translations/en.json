@@ -121,7 +121,7 @@
     },
     "webhook_registration_failed": {
       "title": "MeatPi device unreachable",
-      "description": "Home Assistant could not register its webhook with the device \"{device}\" after several attempts (tried: {endpoints}).\n\nUntil this is resolved the device will not push updates. Please check that:\n\n1. The device is powered on and connected to the network.\n2. Home Assistant can reach the device at the address above.\n3. The device firewall allows connections on port 80.\n\nThe issue clears automatically once registration succeeds."
+      "description": "Home Assistant could not reach the device \"{device}\" to register its webhook (tried: {endpoints}), and the device is not sending data either.\n\nPlease check that:\n\n1. The device is powered on and connected to the network.\n2. Home Assistant can reach the device at the address above.\n3. The device firewall allows connections on port 80.\n\nA device that is asleep needs no action: the issue clears automatically once the device sends data again or the registration succeeds."
     },
     "https_only_server": {
       "title": "{device} cannot push to Home Assistant over HTTPS",

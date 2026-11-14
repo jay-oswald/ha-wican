@@ -19,6 +19,27 @@ MAX_POST_INTERVAL = 3600
 WEBHOOK_REGISTRATION_TIMEOUT = 10  # seconds
 WEBHOOK_RETRY_DELAY_BASE = 2  # seconds for exponential backoff
 WEBHOOK_MAX_RETRIES = 3
+# A firmware that does not read push replies whose registration failed is
+# registered again when it pushes, at most this often.
+REGISTRATION_RETRY_INTERVAL = 300  # seconds
+
+# Settings in the push reply. A firmware that reads the reply to its own
+# push reports the revision of the webhook settings it holds in every push
+# (status.webhook_rev). When that is not the revision Home Assistant wants
+# the device to have, the reply carries the settings: the only way to hand
+# them to a car that pushes but cannot be reached (asleep at start, on LTE
+# without a VPN).
+WEBHOOK_REV_KEY = "webhook_rev"
+WEBHOOK_REV_LENGTH = 8  # hex characters of the revision Home Assistant sends
+WEBHOOK_REV_MAX_LENGTH = 16  # what the device stores and reports
+# Entry data: the device reported a revision in its last push, so it reads
+# replies and a registration may carry "rev".
+CONF_READS_PUSH_REPLY = "reads_push_reply"
+# The device decides by itself whether it trusts a reply, and Home Assistant
+# cannot see the verdict: the body for one unchanged difference is repeated
+# at most this often.
+PUSH_REPLY_REPEAT_INTERVAL = 300  # seconds
+PUSH_REPLY_MAX_BYTES = 2048  # the device ignores a longer reply body
 
 # Minimum supported firmware per release stream (device contract v2).
 # Older firmware keeps telemetry working but gets a persistent repair

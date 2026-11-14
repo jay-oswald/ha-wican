@@ -19,6 +19,25 @@ if TYPE_CHECKING:
 
 
 @dataclass
+class PushReplyState:
+    """Settings in the push reply: what the device reported, what was sent."""
+
+    # The revision in the device's last push (None: it reported none) and
+    # the revision of the settings Home Assistant wants it to have (None:
+    # no settings could be built).
+    reported_rev: str | None = None
+    wanted_rev: str | None = None
+    # The (reported, wanted) pair the last reply body answered and when
+    # (monotonic seconds): one unchanged difference is not answered with a
+    # body on every push.
+    answered: tuple[str, str] | None = None
+    answered_at: float = 0.0
+    # Diagnostics: how many reply bodies went out, and when the last one did.
+    bodies_sent: int = 0
+    last_body_at: str | None = None
+
+
+@dataclass
 class MeatPiRuntimeData:
     """Runtime data for a MeatPi device config entry."""
 
@@ -36,6 +55,15 @@ class MeatPiRuntimeData:
     # Webhook-registration coalescing (see _async_request_webhook_registration)
     registration_running: bool = False
     registration_pending: bool = False
+    # Whether a run that waits was asked for by something other than a push
+    # (a start, a changed option): such a run reports its failure.
+    registration_loud: bool = False
+    # Whether the last registration could not reach the device, and when a
+    # push last triggered a new attempt (monotonic seconds; 0.0 = never).
+    registration_failed: bool = False
+    last_registration_retry: float = 0.0
+    # Settings in the push reply (see PushReplyState).
+    push_reply: PushReplyState = field(default_factory=PushReplyState)
     # Device-type profile (brand framework; defaults to the WiCAN profile,
     # which matches every install that predates device types).
     device_profile: MeatPiDeviceProfile = field(
