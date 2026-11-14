@@ -211,7 +211,13 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         properties = discovery_info.properties or {}
         host = discovery_info.host
         host_ip = _string_ip(discovery_info.ip_address)
-        hostname = getattr(discovery_info, "hostname", "") or ""
+        # Zeroconf gives the host name as a fully qualified one, with a
+        # trailing dot ("wican_<id>.local."); the device reports its own
+        # address without it. Stored with the dot, every push changed the
+        # address back and every start of Home Assistant changed it again:
+        # a reload and two more registrations per start, and a dot at the
+        # end of the entry's title.
+        hostname = (getattr(discovery_info, "hostname", "") or "").rstrip(".")
         port = discovery_info.port
 
         if not host and not host_ip:

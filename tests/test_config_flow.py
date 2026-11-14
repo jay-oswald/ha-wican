@@ -137,7 +137,10 @@ async def test_zeroconf_flow_success(
         await hass.async_block_till_done()
 
         assert result2["type"] == FlowResultType.CREATE_ENTRY
-        assert result2["title"] == "wican_test.local."
+        # Zeroconf's host name ends in a dot; the title and the stored
+        # address are the ones the device itself reports, without it.
+        assert result2["title"] == "wican_test.local"
+        assert result2["data"].get("mdns") == "http://wican_test.local"
         # Check that MAC address was captured
         assert result2["data"].get("mac") == "AA:BB:CC:DD:EE:FF"
         assert result2["data"].get("device_id") == "test_device_123"
@@ -243,7 +246,7 @@ async def test_zeroconf_during_onboarding(
 
     # Zeroconf creates entry directly (no confirmation step)
     assert result["type"] == FlowResultType.CREATE_ENTRY
-    assert result["title"] == "wican_test.local."
+    assert result["title"] == "wican_test.local"
     assert result["description_placeholders"]["webhook_url"] == result["data"]["webhook_url"]
 
 
@@ -483,7 +486,7 @@ async def test_zeroconf_confirm_webhook_url_exception(
 
     assert result2["type"] == FlowResultType.CREATE_ENTRY
     # Title should be the hostname (discovered_name)
-    assert result2["title"] == "wican_test.local."
+    assert result2["title"] == "wican_test.local"
     assert result2["data"]["webhook_url"] == result2["description_placeholders"]["webhook_url"]
 
 
@@ -1100,3 +1103,45 @@ async def test_zeroconf_rediscovery_reloads_without_reload_helper(
     # Reloaded: the fresh runtime is bound to the rediscovered address.
     assert existing.state is config_entries.ConfigEntryState.LOADED
     assert existing.runtime_data.device_host == "http://192.168.1.150"
+
+
+async def test_zeroconf_rediscovery_keeps_the_address_the_device_reports(
+    hass: HomeAssistant,
+) -> None:
+    """A rediscovery does not rewrite an address that has not changed.
+
+    Zeroconf gives the host name with a trailing dot, the device reports its
+    address without one. Stored with the dot, the address changed at every
+    start of Home Assistant (the rediscovery) and back at the next push: a
+    reload and two more registrations per start, seen on a real instance.
+    """
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        unique_id="aabbccddeeff",
+        data={
+            CONF_WEBHOOK_ID: "existing_webhook",
+            "mac": "AA:BB:CC:DD:EE:FF",
+            "mdns": "http://wican_test.local",
+            "host": "http://192.168.1.100",
+        },
+    )
+    entry.add_to_hass(hass)
+    before = dict(entry.data)
+
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN,
+        context={"source": config_entries.SOURCE_ZEROCONF},
+        data=ZeroconfServiceInfo(
+            ip_address="192.168.1.100",
+            ip_addresses=["192.168.1.100"],
+            hostname="wican_test.local.",
+            name="WiCAN-WebServer._wican._tcp.local.",
+            port=80,
+            type="_wican._tcp.local.",
+            properties={"mac": b"AA:BB:CC:DD:EE:FF", "device_id": b"test_device_123"},
+        ),
+    )
+
+    assert result["type"] == FlowResultType.ABORT
+    assert result["reason"] == "already_configured"
+    assert dict(entry.data) == before
