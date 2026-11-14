@@ -32,6 +32,7 @@ if TYPE_CHECKING:
     from datetime import datetime
 
     from homeassistant.core import HomeAssistant
+    from homeassistant.helpers.restore_state import StoredState
 
     from . import MeatPiConfigEntry
 
@@ -40,6 +41,23 @@ _LOGGER = logging.getLogger(__name__)
 # WiCAN is push-based via webhooks, so we don't need frequent polling
 # This is just for fallback/health check
 UPDATE_INTERVAL = timedelta(seconds=WICAN_DATA_UPDATE_INTERVAL)
+
+
+def _stored_state(hass: HomeAssistant, entity_id: str) -> StoredState | None:
+    """Return the state Home Assistant kept for an entity across its restart.
+
+    Home Assistant 2026.11 keys the stored states by entity registry id
+    and reads them through ``async_get_stored_state``; before that they
+    sat in ``last_states``, by entity id. Reading the old attribute on a
+    new Home Assistant raised, which failed the first refresh and left a
+    device that had gone quiet looking connected after a restart.
+    """
+    data = async_get_restore_state(hass)
+    read = getattr(data, "async_get_stored_state", None)
+    if read is not None:
+        stored: StoredState | None = read(entity_id)
+        return stored
+    return data.last_states.get(entity_id)
 
 
 class MeatPiDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
@@ -130,7 +148,7 @@ class MeatPiDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         )
         if entity_id is None:
             return
-        stored = async_get_restore_state(self.hass).last_states.get(entity_id)
+        stored = _stored_state(self.hass, entity_id)
         if stored is None:
             return
         try:

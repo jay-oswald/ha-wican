@@ -19,6 +19,7 @@ and entities.
 from __future__ import annotations
 
 from datetime import timedelta
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -517,3 +518,39 @@ async def test_restore_last_push_adopts_the_stored_time(
     assert pushed > seen
     coordinator.async_restore_last_push()
     assert coordinator.last_push == pushed
+
+
+@pytest.mark.parametrize("helper", ["method", "attribute"])
+async def test_restore_last_push_reads_either_restore_helper(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, helper: str,
+) -> None:
+    """The stored time is read from the helper of a new and of an old Home Assistant.
+
+    Home Assistant 2026.11 dropped the restore helper's ``last_states`` and
+    reads a stored state through ``async_get_stored_state``. Reading the old
+    attribute there raised in the first refresh ("'RestoreStateData' object
+    has no attribute 'last_states'", seen on a real 2026.11.1 at every load
+    of the entry), and a device that had gone quiet looked connected after a
+    restart.
+    """
+    mock_config_entry.add_to_hass(hass)
+    entity_id = _register_last_seen(hass, mock_config_entry)
+    seen = dt_util.utcnow().replace(microsecond=0) - timedelta(hours=2)
+    stored = SimpleNamespace(state=State(entity_id, seen.isoformat()))
+    if helper == "method":
+        # 2026.11 and later: there is no last_states to fall back to.
+        data = SimpleNamespace(
+            async_get_stored_state=lambda wanted: stored if wanted == entity_id else None,
+        )
+    else:
+        data = SimpleNamespace(last_states={entity_id: stored})
+    coordinator = MeatPiDataUpdateCoordinator(hass, mock_config_entry)
+
+    with patch(
+        "custom_components.wican.coordinator.async_get_restore_state",
+        return_value=data,
+    ):
+        await coordinator.async_config_entry_first_refresh()
+
+    assert coordinator.last_push == seen
+    assert coordinator.device_online is False
