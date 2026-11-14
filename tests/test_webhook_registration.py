@@ -18,6 +18,8 @@ from custom_components.wican.const import CONF_POST_INTERVAL, DOMAIN
 
 from tests.conftest import MockConfigEntry
 
+pytestmark = pytest.mark.real_webhook_registration
+
 
 @pytest.fixture
 def mock_session():

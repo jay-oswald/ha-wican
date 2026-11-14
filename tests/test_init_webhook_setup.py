@@ -196,6 +196,7 @@ async def test_webhook_registration_normalizes_host_scheme(hass: HomeAssistant) 
     assert entry.data["host"] == "http://192.168.1.100"
 
 
+@pytest.mark.real_webhook_registration
 async def test_webhook_registration_derives_host_from_ip(hass: HomeAssistant) -> None:
     """Test webhook registration derives host from IP when host is missing."""
     entry = MockConfigEntry(
@@ -218,6 +219,7 @@ async def test_webhook_registration_derives_host_from_ip(hass: HomeAssistant) ->
     assert entry.runtime_data.device_host == "http://192.168.1.50"
 
 
+@pytest.mark.real_webhook_registration
 async def test_webhook_registration_caches_successful_ip(hass: HomeAssistant) -> None:
     """Test that successful webhook registration caches the resolved IP."""
     entry = MockConfigEntry(
