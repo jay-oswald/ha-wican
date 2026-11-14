@@ -171,9 +171,11 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     require_current_request=True,
                 )
             except NoURLAvailableError:
-                # E.g. setting up via Nabu Casa cloud with no internal URL
-                # configured: the device needs a plain-http URL to push to.
-                # A friendly abort beats "Unknown error occurred".
+                # This instance has no address at all a device could push
+                # to (no network address yet and no URL configured). A
+                # web server with SSL on does not end here: the resolver
+                # hands out its https address. A friendly abort beats
+                # "Unknown error occurred".
                 return self.async_abort(reason="no_url_available")
             entry_data = {
                 CONF_WEBHOOK_ID: webhook_id,

@@ -146,6 +146,25 @@ without deleting and re-adding the integration.
 - If no local HTTP Home Assistant URL is available, WiCAN-Pro `v4.49+` can fall
   back to a single external HTTPS webhook URL.
 
+#### Home Assistant with SSL on its own web server
+With `ssl_certificate` and `ssl_key` under `http:` in `configuration.yaml`, Home
+Assistant answers over HTTPS only, so every webhook URL is an https one:
+
+- The first URL is the **Local network URL** (*Settings > System > Network*) when
+  it is an https address, otherwise Home Assistant's own address by IP
+  (`https://<ip>:8123`). The second URL is the **Internet URL**, when it differs.
+- A WiCAN-Pro pushes over HTTPS. It checks the certificate against its built-in
+  list of public certificate authorities (Let's Encrypt and others); for an
+  address by IP it does not compare the name on the certificate. A Local network
+  URL by name has to be a name the certificate carries.
+- A self-signed or private certificate has to be made known to the device: upload
+  its CA certificate as a certificate set (*System > Certificates* on the device)
+  and select that set on the device's *Home Assistant* card (*Automate*).
+- WiCAN OBD-II and WiCAN USB cannot push over HTTPS. For them, keep Home
+  Assistant's own web server on plain http and let a reverse proxy serve HTTPS
+  (for example the NGINX Home Assistant SSL proxy add-on). Otherwise a repair
+  issue tells you that the device cannot deliver its data.
+
 ## Store and forward (history catch-up for offline drives)
 
 A vehicle spends most of its life away from your WiFi. With **Store and
@@ -278,6 +297,9 @@ automation:
 - **Webhook reachability is required.** The device must be able to reach Home
   Assistant's webhook URL; if it cannot, entities will not update and a repair
   issue is raised.
+- **WiCAN OBD-II and WiCAN USB need a plain http address.** They cannot push to
+  a Home Assistant whose own web server has SSL on (see
+  [Webhook URL behavior](#webhook-url-behavior)).
 - Changing the vehicle/PID configuration on the device may add or remove PIDs;
   stale entities can be removed manually (see Troubleshooting).
 
@@ -293,6 +315,13 @@ The WiCAN device might not be reachable, or its protocol is not set to AutoPID.
 Home Assistant was restarted or the integration reloaded while the device was
 unavailable (car away, sleep mode). Make the device available again (e.g. turn on
 the ignition) and reload the integration.
+
+If Home Assistant's own web server has SSL on, also check the device's *Home
+Assistant* card (*Automate*). A `failed` status there usually means that the
+device does not trust Home Assistant's certificate, or that the Local network URL
+is a name the certificate does not carry; the device log then shows
+`mbedtls_ssl_handshake returned -0x2700`. See
+[Webhook URL behavior](#webhook-url-behavior).
 
 ### Firmware update fails
 1. Confirm Home Assistant can reach the device on the local network.

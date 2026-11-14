@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from homeassistant import config_entries
+from homeassistant.components.http import ApiConfig
 from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
 from homeassistant.helpers.service_info.zeroconf import ZeroconfServiceInfo
@@ -790,6 +791,95 @@ async def test_zeroconf_confirm_no_url_available_aborts_cleanly(
 
     assert result2["type"] == FlowResultType.ABORT
     assert result2["reason"] == "no_url_available"
+
+
+# ---- Home Assistant's own web server with SSL on (HTTPS only) ---------------
+
+
+def _server_with_ssl(hass: HomeAssistant) -> None:
+    """What `ssl_certificate` under `http:` makes of the server description.
+
+    Call it after the flow is initialised: loading the integration sets up
+    the http component, which writes hass.config.api.
+    """
+    hass.config.api = ApiConfig("192.168.1.10", "192.168.1.10", 8123, True)
+    hass.config.internal_url = None
+    hass.config.external_url = "https://ha.example.org:8123"
+
+
+async def test_user_flow_server_with_ssl(
+    hass: HomeAssistant,
+    mock_aiohttp_session,
+) -> None:
+    """The manual add goes through on a Home Assistant that answers HTTPS only.
+
+    Regression (ha-wican issue 110): with `ssl_certificate` under `http:`
+    no plain-http address exists; the flow asked for one and aborted with
+    no_url_available before the device was ever contacted.
+    """
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN,
+        context={"source": config_entries.SOURCE_USER},
+    )
+    _server_with_ssl(hass)
+
+    with patch(
+        "custom_components.wican._async_register_webhook_on_device",
+        return_value=True,
+    ):
+        result2 = await hass.config_entries.flow.async_configure(
+            result["flow_id"],
+            {"mdns": "192.168.1.50"},
+        )
+        await hass.async_block_till_done()
+
+    assert result2["type"] == FlowResultType.CREATE_ENTRY
+    webhook_id = result2["data"][CONF_WEBHOOK_ID]
+    assert (
+        result2["data"]["webhook_url"]
+        == f"https://192.168.1.10:8123/api/webhook/{webhook_id}"
+    )
+    assert result2["description_placeholders"]["webhook_url"] == result2["data"]["webhook_url"]
+
+
+async def test_zeroconf_confirm_server_with_ssl(
+    hass: HomeAssistant,
+    mock_aiohttp_session,
+) -> None:
+    """A discovered device is added on a Home Assistant that answers HTTPS only."""
+    discovery_info = ZeroconfServiceInfo(
+        ip_address="192.168.1.100",
+        ip_addresses=["192.168.1.100"],
+        hostname="wican_ssl.local.",
+        name="WiCAN-WebServer._wican._tcp.local.",
+        port=80,
+        type="_wican._tcp.local.",
+        properties={"mac": b"AA:BB:CC:DD:EE:F1", "device_type": b"wican_pro"},
+    )
+
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN,
+        context={"source": config_entries.SOURCE_ZEROCONF},
+        data=discovery_info,
+    )
+    assert result["type"] == FlowResultType.FORM
+    _server_with_ssl(hass)
+
+    with patch(
+        "custom_components.wican._async_register_webhook_on_device",
+        return_value=True,
+    ):
+        result2 = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {},
+        )
+        await hass.async_block_till_done()
+
+    assert result2["type"] == FlowResultType.CREATE_ENTRY
+    webhook_id = result2["data"][CONF_WEBHOOK_ID]
+    assert (
+        result2["data"]["webhook_url"]
+        == f"https://192.168.1.10:8123/api/webhook/{webhook_id}"
+    )
 
 
 async def test_zeroconf_adopts_existing_manual_entry(

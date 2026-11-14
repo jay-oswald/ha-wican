@@ -35,7 +35,7 @@
       "reconfigure_successful": "[%key:common::config_flow::abort::reconfigure_successful%]",
       "no_host": "The discovered device did not provide a usable network address.",
       "not_wican": "The discovered service is not a MeatPi device.",
-      "no_url_available": "Home Assistant has no HTTP address the device could push to. Set the internal URL under Settings > System > Network, then retry setup."
+      "no_url_available": "Home Assistant has no address the device could push to. Check that Home Assistant is connected to the network, or set the Local network URL under Settings > System > Network, then retry setup."
     },
     "create_entry": {
       "default": "To send events to Home Assistant, you will need to set up a webhook.\n\nOpen the device's web interface and go to *Settings → Services → Automation → Webhooks*\n\nEnable *Webhooks* and fill in the following webhook in the URL field:\n\n`{webhook_url}`\n\nHome Assistant also registers this automatically when it can reach the device. See [the documentation]({docs_url}) for further details."
@@ -117,6 +117,10 @@
     "webhook_registration_failed": {
       "title": "MeatPi device unreachable",
       "description": "Home Assistant could not register its webhook with the device \"{device}\" after several attempts (tried: {endpoints}).\n\nUntil this is resolved the device will not push updates. Please check that:\n\n1. The device is powered on and connected to the network.\n2. Home Assistant can reach the device at the address above.\n3. The device firewall allows connections on port 80.\n\nThe issue clears automatically once registration succeeds."
+    },
+    "https_only_server": {
+      "title": "{device} cannot push to Home Assistant over HTTPS",
+      "description": "Home Assistant's own web server has SSL turned on (`ssl_certificate` under `http:` in configuration.yaml), so it answers over HTTPS only. The device \"{device}\" has no HTTPS support and can only push to a plain http address, so its data cannot reach Home Assistant and its entities stay unavailable.\n\nTo use this device, let a reverse proxy serve HTTPS (for example the NGINX Home Assistant SSL proxy add-on) and leave Home Assistant's own web server on plain http. A WiCAN PRO is not affected: it pushes over HTTPS.\n\nThe issue clears automatically once Home Assistant has a plain http address again."
     }
   },
   "exceptions": {

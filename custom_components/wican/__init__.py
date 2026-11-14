@@ -67,10 +67,16 @@ from .const import (
     WEBHOOK_RETRY_DELAY_BASE,
 )
 from .coordinator import MeatPiDataUpdateCoordinator
-from .devices import WICAN_FAMILY_TYPES, get_profile, infer_device_type
+from .devices import (
+    DEVICE_TYPE_WICAN,
+    DEVICE_TYPE_WICAN_USB,
+    WICAN_FAMILY_TYPES,
+    get_profile,
+    infer_device_type,
+)
 from .exceptions import MeatPiApiError, MeatPiWebhookError
 from .github_releases import GitHubReleasesCoordinator, hardware_stream
-from .helpers import resolve_device_webhook_urls
+from .helpers import NoPlainHttpURLError, resolve_device_webhook_urls
 from .history import async_remove_history_store, async_sync_history
 from .models import MeatPiRuntimeData
 from .param_loader import async_update_params_from_github
@@ -90,6 +96,9 @@ PLATFORMS: list[Platform] = [
 
 # Type alias for config entry with runtime data
 MeatPiConfigEntry = ConfigEntry[MeatPiRuntimeData]
+
+# Products without a TLS stack: they push to a plain-http address only.
+_NO_TLS_DEVICE_TYPES = frozenset({DEVICE_TYPE_WICAN, DEVICE_TYPE_WICAN_USB})
 
 
 class _WebhookEndpointsFailedError(MeatPiWebhookError):
@@ -167,17 +176,39 @@ def _supports_dual_webhook_urls(entry: MeatPiConfigEntry) -> bool:
     return "pro" in hw_version
 
 
+def _device_tls_support(entry: MeatPiConfigEntry) -> bool | None:
+    """Return whether the device can push over HTTPS; None when not known.
+
+    A WiCAN PRO can. WiCAN OBD and USB cannot, and that verdict needs the
+    device's own word: a hardware string that names a WiCAN and is not a
+    PRO. A missing or unrecognized string proves nothing, because the
+    WiCAN type is also the default for an entry that has not reported
+    itself yet and for a product the integration does not know.
+    """
+    if _supports_dual_webhook_urls(entry):
+        return True
+    hw_version = str(entry.data.get("hw_version") or "").lower()
+    if "wican" in hw_version and infer_device_type(hw_version) in _NO_TLS_DEVICE_TYPES:
+        return False
+    return None
+
+
 def _build_webhook_payload(
     hass: HomeAssistant,
     entry: MeatPiConfigEntry,
     post_interval: int,
 ) -> dict[str, str | bool | int | list[str]]:
-    """Build the webhook registration payload for the device firmware."""
+    """Build the webhook registration payload for the device firmware.
+
+    Raises NoPlainHttpURLError when Home Assistant's web server has SSL on
+    and the device is known to have no TLS, NoURLAvailableError when this
+    instance has no address at all.
+    """
     urls = resolve_device_webhook_urls(
         hass,
         entry.runtime_data.webhook_id,
+        device_tls=_device_tls_support(entry),
         fallback_url=entry.data.get("webhook_url"),
-        allow_external_https_fallback=_supports_dual_webhook_urls(entry),
     )
 
     payload: dict[str, str | bool | int | list[str]] = {
@@ -186,7 +217,9 @@ def _build_webhook_payload(
         "interval": post_interval,
     }
 
-    if _supports_dual_webhook_urls(entry) and len(urls) > 1:
+    # A second URL is resolved only for a device that may speak TLS (a
+    # PRO, or any device while the server answers over HTTPS only).
+    if len(urls) > 1:
         payload["urls"] = urls
 
     return payload
@@ -594,6 +627,68 @@ def _clear_webhook_repair(hass: HomeAssistant, entry: MeatPiConfigEntry) -> None
     ir.async_delete_issue(hass, DOMAIN, _webhook_repair_issue_id(entry))
 
 
+def _https_only_repair_issue_id(entry: MeatPiConfigEntry) -> str:
+    """Return the repair issue id for a no-TLS device on an HTTPS-only server."""
+    return f"https_only_server_{entry.entry_id}"
+
+
+def _raise_https_only_repair(hass: HomeAssistant, entry: MeatPiConfigEntry) -> None:
+    """Tell the user this device cannot push to an HTTPS-only Home Assistant.
+
+    Home Assistant's own web server has SSL on, so no plain-http address
+    exists, and the device (WiCAN OBD, WiCAN USB) has no TLS stack: no URL
+    can be registered on it. Clears itself at the next registration that
+    finds a plain-http address.
+    """
+    ir.async_create_issue(
+        hass,
+        DOMAIN,
+        _https_only_repair_issue_id(entry),
+        is_fixable=False,
+        severity=ir.IssueSeverity.ERROR,
+        translation_key="https_only_server",
+        translation_placeholders={"device": entry.title},
+    )
+
+
+def _clear_https_only_repair(hass: HomeAssistant, entry: MeatPiConfigEntry) -> None:
+    """Clear a previously raised HTTPS-only-server repair issue."""
+    ir.async_delete_issue(hass, DOMAIN, _https_only_repair_issue_id(entry))
+
+
+def _registration_payload(
+    hass: HomeAssistant,
+    entry: MeatPiConfigEntry,
+    post_interval: int,
+) -> dict[str, str | bool | int | list[str]] | None:
+    """Return the payload to register on the device, or None without one.
+
+    Keeps the HTTPS-only repair issue in step with it: raised when Home
+    Assistant's web server has SSL on and this device has no TLS (there is
+    no address to register, and saying so beats leaving every entity
+    unavailable in silence), cleared as soon as a payload can be built.
+    """
+    try:
+        payload = _build_webhook_payload(hass, entry, post_interval)
+    except NoPlainHttpURLError:
+        _LOGGER.warning(
+            "%s cannot push over HTTPS and Home Assistant's web server "
+            "answers over HTTPS only: no webhook registered",
+            entry.title,
+        )
+        _raise_https_only_repair(hass, entry)
+        return None
+    except Exception as err:
+        _LOGGER.warning(
+            "Cannot generate webhook URL payload for %s: %s",
+            entry.entry_id,
+            err,
+        )
+        return None
+    _clear_https_only_repair(hass, entry)
+    return payload
+
+
 def _firmware_repair_issue_id(entry: MeatPiConfigEntry) -> str:
     """Return the repair issue id for below-minimum firmware."""
     return f"firmware_update_required_{entry.entry_id}"
@@ -889,6 +984,7 @@ async def async_unload_entry(
         _cancel_history_followup(entry.runtime_data)
         webhook.async_unregister(hass, entry.runtime_data.webhook_id)
         _clear_webhook_repair(hass, entry)
+        _clear_https_only_repair(hass, entry)
     return unload_ok
 
 
@@ -1306,18 +1402,8 @@ async def _async_register_webhook_on_device(  # noqa: C901, PLR0912, PLR0915
     # Get post interval from runtime_data
     post_interval = runtime.post_interval
 
-    try:
-        payload = _build_webhook_payload(
-            hass,
-            entry,
-            post_interval,
-        )
-    except Exception as err:
-        _LOGGER.warning(
-            "Cannot generate webhook URL payload for %s: %s",
-            entry.entry_id,
-            err,
-        )
+    payload = _registration_payload(hass, entry, post_interval)
+    if payload is None:
         return False
 
     _LOGGER.info(
@@ -1326,13 +1412,15 @@ async def _async_register_webhook_on_device(  # noqa: C901, PLR0912, PLR0915
         post_interval,
     )
 
-    # Backfill webhook_url for older entries after successfully building payload.
-    if "webhook_url" not in entry.data:
+    # Keep the stored URL on what is registered now. It is the fallback
+    # for a start without a usable network address, so a URL from an older
+    # server configuration (SSL off, another address) must not stay in it.
+    if entry.data.get("webhook_url") != payload["url"]:
         hass.config_entries.async_update_entry(
             entry,
             data={**entry.data, "webhook_url": payload["url"]},
         )
-        _LOGGER.debug("Backfilled webhook_url for entry %s", entry.entry_id)
+        _LOGGER.debug("Stored webhook_url updated for entry %s", entry.entry_id)
 
     # Use HA's shared session (reuses connections)
     session = async_get_clientsession(hass)
