@@ -1291,21 +1291,24 @@ def _schedule_webhook_registration(hass: HomeAssistant, entry: MeatPiConfigEntry
         hass.async_create_task(_async_request_webhook_registration(hass, entry))
         return
 
-    fired = False
+    cancelled = False
 
     @callback
     def _on_started(_: object) -> None:
-        nonlocal fired
-        fired = True
-        hass.async_create_task(_async_request_webhook_registration(hass, entry))
+        if not cancelled:
+            hass.async_create_task(_async_request_webhook_registration(hass, entry))
 
-    unsub = hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STARTED, _on_started)
+    hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STARTED, _on_started)
 
     def _cancel_startup_registration() -> None:
-        # Only unsubscribe if the once-listener has not fired (it removes
-        # itself on fire; removing again would log an error).
-        if not fired:
-            unsub()
+        # A flag, not an unsubscribe: an entry can be unloaded while the
+        # started event is being fired (a rediscovery that changes its
+        # address reloads it). The listener is then already taken for
+        # that event, removing it logged "Unable to remove unknown job
+        # listener" and the registration still ran for the unloaded
+        # entry. The once-listener removes itself when it fires.
+        nonlocal cancelled
+        cancelled = True
 
     entry.async_on_unload(_cancel_startup_registration)
 
