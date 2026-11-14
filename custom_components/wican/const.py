@@ -258,4 +258,10 @@ PID_VALUE_DECIMALS = 3
 # the device together, and the largest answer read from it.
 WEBHOOK_RELEASE_TIMEOUT = 10  # seconds
 WEBHOOK_SETTINGS_MAX_BYTES = 16384
+
+# The webhook ids of removed entries, kept answering 410 Gone for a device
+# that could not be told (removed_webhooks.py). The newest this many.
+REMOVED_WEBHOOKS_STORAGE_KEY = f"{DOMAIN}.removed_webhooks"
+REMOVED_WEBHOOKS_STORAGE_VERSION = 1
+MAX_REMOVED_WEBHOOKS = 64
 MAX_DEVICE_INFO_FIELD_LENGTH = 255

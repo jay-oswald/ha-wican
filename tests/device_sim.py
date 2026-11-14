@@ -284,12 +284,40 @@ class SimulatedWebhookFirmware:
         ``webhook`` object) or a firmware that does not read replies.
         Every other verdict is kept in :attr:`reply_verdicts`.
         """
+        if self.reads_replies and status == 410:
+            verdict = self._judge_gone(body)
+            if verdict != "none":
+                self.reply_verdicts.append(verdict)
+            return verdict
         if not self.reads_replies or status != 200 or not body:
             return "none"
         verdict = self._judge_reply(body)
         if verdict != "none":
             self.reply_verdicts.append(verdict)
         return verdict
+
+    def _judge_gone(self, body: bytes) -> str:
+        """A 410: Home Assistant removed this device (firmware 6.0.0-beta.11).
+
+        Only with Home Assistant's marker in the body; the webhook is
+        cleared as ``DELETE /api/webhook`` clears it.
+        """
+        try:
+            parsed = json.loads(body) if len(body) <= self.REPLY_MAX else None
+        except ValueError:
+            parsed = None
+        webhook = parsed.get("webhook") if isinstance(parsed, dict) else None
+        if not isinstance(webhook, dict) or webhook.get("removed") is not True:
+            return "none"
+        if self.pinned:
+            return "pinned"
+        if not self.trusts_replies:
+            return "untrusted"
+        self.url = ""
+        self.urls = []
+        self.enabled = False
+        self.rev = ""
+        return "removed"
 
     def _judge_reply(self, body: bytes) -> str:
         if len(body) > self.REPLY_MAX:

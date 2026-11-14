@@ -30,6 +30,7 @@ from .const import (
 )
 from .devices import DEVICE_TYPE_GENERIC, is_known_device_type
 from .helpers import resolve_webhook_url
+from .removed_webhooks import async_get_removed_webhooks
 
 if TYPE_CHECKING:
     from ipaddress import IPv4Address, IPv6Address
@@ -302,6 +303,11 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self.discovered_mac = mac_address
         self.discovered_device_id = device_id
         self.discovered_device_type = device_type
+        # A device discovered while it still posts to an entry removed here
+        # is answered 410 Gone. With no entry left nothing else loads the
+        # removed webhooks after a restart of Home Assistant.
+        await async_get_removed_webhooks(self.hass)
+
         # The card on the integrations page: without a name every discovered
         # device stood there under the integration's name alone, and two
         # devices could only be told apart by opening each.
