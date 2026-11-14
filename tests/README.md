@@ -37,6 +37,10 @@ lists the required test coverage).
 pip install -r requirements_test.txt
 ```
 
+The list includes `home-assistant-frontend`: the tests of the GPS track card
+(`test_frontend_card.py`) set the frontend up, and three of them are skipped
+where the package is missing.
+
 ## Running Tests
 
 ### Run all tests
