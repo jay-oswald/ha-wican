@@ -37,7 +37,13 @@ if TYPE_CHECKING:
 
     from tests.conftest import MockConfigEntry
 
-pytestmark = pytest.mark.usefixtures("one_registration_attempt")
+# These tests drive the integration's own registration (a device that
+# cannot be reached, a revision in the payload): the conftest mock of the
+# registration stays out, and one attempt is enough.
+pytestmark = [
+    pytest.mark.usefixtures("one_registration_attempt"),
+    pytest.mark.real_webhook_registration,
+]
 
 REGISTRATION = ("POST", "/api/webhook")
 

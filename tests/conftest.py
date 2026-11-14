@@ -68,6 +68,35 @@ def mock_capability_probe() -> Generator[MagicMock]:
         yield client_cls
 
 
+@pytest.fixture(autouse=True)
+def mock_webhook_registration(
+    request: pytest.FixtureRequest,
+) -> Generator[AsyncMock | None]:
+    """Keep webhook registration on the device off the network in every test.
+
+    Every push that changes the entry's data re-registers the webhook on the
+    device. Unmocked, that connects to the test entry's address, is refused
+    and retries with a 1 s then 2 s backoff, so each push costs 3 s. Tests
+    of the registration itself opt out with
+    ``@pytest.mark.real_webhook_registration``.
+    """
+    if request.node.get_closest_marker("real_webhook_registration"):
+        yield None
+        return
+    with patch(
+        "custom_components.wican._async_register_webhook_on_device",
+        return_value=True,
+    ) as register:
+        yield register
+
+
+@pytest.fixture(autouse=True)
+def no_firmware_reboot_delay() -> Generator[None]:
+    """Skip the wait for the device to reboot after a firmware update."""
+    with patch("custom_components.wican.update.FIRMWARE_UPDATE_REBOOT_DELAY", 0):
+        yield
+
+
 @pytest.fixture
 def one_registration_attempt(monkeypatch: pytest.MonkeyPatch) -> None:
     """Give the real webhook registration a single attempt.
