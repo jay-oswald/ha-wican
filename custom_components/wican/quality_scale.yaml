@@ -83,8 +83,9 @@ rules:
   docs-configuration-parameters:
     status: done
     comment: >
-      README documents the Post Interval and history-backfill options
-      (defaults, ranges, effects) plus a dedicated history-backfill section.
+      README documents the Post Interval, history-backfill and
+      keep-last-values options (defaults, ranges, effects) plus a dedicated
+      history-backfill section.
   docs-installation-parameters:
     status: done
     comment: README documents the manual setup inputs (mdns, host).
@@ -92,7 +93,13 @@ rules:
     status: done
     comment: >
       Coordinator tracks last push time and raises UpdateFailed when the device
-      goes stale, so all coordinator entities become unavailable.
+      goes stale, so all coordinator entities become unavailable. The last push
+      time is restored at startup, so a device that went quiet across a restart
+      starts out unavailable as well. The per-device keep-last-values option
+      (opt-in, default off) lets the reading entities (status and PID sensors,
+      location) hold their last value instead; link and control entities still
+      go unavailable, and the always-available Connected and Last seen sensors
+      report the absence.
   integration-owner:
     status: done
   log-when-unavailable:
@@ -185,7 +192,8 @@ rules:
     status: done
     comment: >
       Static sensor/binary_sensor/button entities use icons.json (the restart
-      button inherits its device-class icon). Dynamic PID sensors use runtime
+      button and the Connected sensor inherit their device-class icons).
+      Dynamic PID sensors use runtime
       device_class-derived icons (keys unknown ahead of time); device_tracker
       uses a single fixed icon.
   reconfiguration-flow:
@@ -195,7 +203,12 @@ rules:
     status: done
     comment: >
       A repair issue is raised when webhook registration fails after all
-      retries and cleared on the next successful registration or on unload.
+      retries and the device is not pushing either; it is cleared on the
+      next successful registration, on the next push or on unload.
+      A second one (https_only_server) says that a device without TLS
+      (WiCAN OBD, WiCAN USB) cannot push to a Home Assistant whose own web
+      server has SSL on; it clears once a plain-http address exists again
+      or on unload.
   stale-devices:
     status: exempt
     comment: >

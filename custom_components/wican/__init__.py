@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from http import HTTPStatus
 import ipaddress
+import json
 import logging
+import os
 import re
 import time
 from typing import TYPE_CHECKING, Any
@@ -16,11 +19,20 @@ from aiohttp.web import Request, Response
 from homeassistant.components import webhook
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_WEBHOOK_ID, EVENT_HOMEASSISTANT_STARTED, Platform
-from homeassistant.core import callback
+from homeassistant.components.frontend import add_extra_js_url
+from aiohttp import web
+from homeassistant.components.http import HomeAssistantView
+from homeassistant.loader import async_get_integration
+from pathlib import Path
+from homeassistant.core import ServiceCall, ServiceResponse, SupportsResponse, callback
+from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers import config_validation as cv, device_registry as dr
 from homeassistant.exceptions import ConfigEntryError
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.dispatcher import async_dispatcher_send
+from homeassistant.helpers.event import async_call_later
+from homeassistant.util import dt as dt_util
 from homeassistant.util.json import json_loads
 import voluptuous as vol
 from yarl import URL
@@ -28,34 +40,62 @@ from yarl import URL
 from .api import DeviceCapabilities, MeatPiApiClient
 from .catalog import async_setup_catalog
 from .const import (
+    GPX_CARD_FILE,
+    FRONTEND_STATIC_URL,
+    DATA_FRONTEND_REGISTERED,
+    ATTR_HOURS,
     COMPONENT_DATA_LOGGER,
+    DEFAULT_GPX_HOURS,
+    GPX_DIR,
+    GPX_MAX_PAGES,
+    GPX_PAGE_POINTS,
+    MAX_GPX_HOURS,
+    SERVICE_SAVE_GPX,
     CONF_DEVICE_TYPE,
     CONF_HISTORY_SYNC,
     CONF_POST_INTERVAL,
+    CONF_READS_PUSH_REPLY,
     DEFAULT_HISTORY_SYNC,
     DEFAULT_POST_INTERVAL,
     DOMAIN,
+    HISTORY_MAX_FOLLOWUPS,
     HISTORY_SYNC_MIN_INTERVAL,
     IP_CACHE_DURATION,
     MAX_DEVICE_INFO_FIELD_LENGTH,
     MAX_WEBHOOK_BODY_BYTES,
     MIN_FIRMWARE_BY_STREAM,
     PROBE_RETRY_INTERVAL,
+    PUSH_REPLY_MAX_BYTES,
+    PUSH_REPLY_REPEAT_INTERVAL,
+    REGISTRATION_RETRY_INTERVAL,
     SIGNAL_CAPABILITIES_UPDATED,
     WEBHOOK_MAX_RETRIES,
     WEBHOOK_REGISTRATION_TIMEOUT,
+    WEBHOOK_RELEASE_TIMEOUT,
     WEBHOOK_RETRY_DELAY_BASE,
+    WEBHOOK_REV_KEY,
+    WEBHOOK_REV_LENGTH,
+    WEBHOOK_REV_MAX_LENGTH,
 )
 from .coordinator import MeatPiDataUpdateCoordinator
-from .devices import WICAN_FAMILY_TYPES, get_profile, infer_device_type
-from .exceptions import MeatPiWebhookError
+from .devices import (
+    DEVICE_TYPE_WICAN,
+    DEVICE_TYPE_WICAN_USB,
+    WICAN_FAMILY_TYPES,
+    get_profile,
+    infer_device_type,
+)
+from .exceptions import MeatPiApiError, MeatPiWebhookError
 from .github_releases import GitHubReleasesCoordinator, hardware_stream
-from .helpers import resolve_device_webhook_urls
+from .helpers import NoPlainHttpURLError, resolve_device_webhook_urls
 from .history import async_remove_history_store, async_sync_history
 from .models import MeatPiRuntimeData
 from .param_loader import async_update_params_from_github
+from .removed_webhooks import async_get_removed_webhooks, async_release_webhook_at
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from homeassistant.core import HomeAssistant
 
 _LOGGER = logging.getLogger(__name__)
@@ -70,6 +110,9 @@ PLATFORMS: list[Platform] = [
 
 # Type alias for config entry with runtime data
 MeatPiConfigEntry = ConfigEntry[MeatPiRuntimeData]
+
+# Products without a TLS stack: they push to a plain-http address only.
+_NO_TLS_DEVICE_TYPES = frozenset({DEVICE_TYPE_WICAN, DEVICE_TYPE_WICAN_USB})
 
 
 class _WebhookEndpointsFailedError(MeatPiWebhookError):
@@ -147,17 +190,39 @@ def _supports_dual_webhook_urls(entry: MeatPiConfigEntry) -> bool:
     return "pro" in hw_version
 
 
+def _device_tls_support(entry: MeatPiConfigEntry) -> bool | None:
+    """Return whether the device can push over HTTPS; None when not known.
+
+    A WiCAN PRO can. WiCAN OBD and USB cannot, and that verdict needs the
+    device's own word: a hardware string that names a WiCAN and is not a
+    PRO. A missing or unrecognized string proves nothing, because the
+    WiCAN type is also the default for an entry that has not reported
+    itself yet and for a product the integration does not know.
+    """
+    if _supports_dual_webhook_urls(entry):
+        return True
+    hw_version = str(entry.data.get("hw_version") or "").lower()
+    if "wican" in hw_version and infer_device_type(hw_version) in _NO_TLS_DEVICE_TYPES:
+        return False
+    return None
+
+
 def _build_webhook_payload(
     hass: HomeAssistant,
     entry: MeatPiConfigEntry,
     post_interval: int,
 ) -> dict[str, str | bool | int | list[str]]:
-    """Build the webhook registration payload for the device firmware."""
+    """Build the webhook registration payload for the device firmware.
+
+    Raises NoPlainHttpURLError when Home Assistant's web server has SSL on
+    and the device is known to have no TLS, NoURLAvailableError when this
+    instance has no address at all.
+    """
     urls = resolve_device_webhook_urls(
         hass,
         entry.runtime_data.webhook_id,
+        device_tls=_device_tls_support(entry),
         fallback_url=entry.data.get("webhook_url"),
-        allow_external_https_fallback=_supports_dual_webhook_urls(entry),
     )
 
     payload: dict[str, str | bool | int | list[str]] = {
@@ -166,7 +231,9 @@ def _build_webhook_payload(
         "interval": post_interval,
     }
 
-    if _supports_dual_webhook_urls(entry) and len(urls) > 1:
+    # A second URL is resolved only for a device that may speak TLS (a
+    # PRO, or any device while the server answers over HTTPS only).
+    if len(urls) > 1:
         payload["urls"] = urls
 
     return payload
@@ -498,7 +565,7 @@ def _persist_device_reported_info(
             entry.title,
         )
         hass.async_create_task(
-            _async_request_webhook_registration(hass, entry),
+            _async_request_webhook_registration(hass, entry, from_push=True),
         )
 
     # A new address or a new firmware version can change what the control
@@ -574,6 +641,300 @@ def _clear_webhook_repair(hass: HomeAssistant, entry: MeatPiConfigEntry) -> None
     ir.async_delete_issue(hass, DOMAIN, _webhook_repair_issue_id(entry))
 
 
+def _https_only_repair_issue_id(entry: MeatPiConfigEntry) -> str:
+    """Return the repair issue id for a no-TLS device on an HTTPS-only server."""
+    return f"https_only_server_{entry.entry_id}"
+
+
+def _raise_https_only_repair(hass: HomeAssistant, entry: MeatPiConfigEntry) -> None:
+    """Tell the user this device cannot push to an HTTPS-only Home Assistant.
+
+    Home Assistant's own web server has SSL on, so no plain-http address
+    exists, and the device (WiCAN OBD, WiCAN USB) has no TLS stack: no URL
+    can be registered on it. Clears itself at the next registration that
+    finds a plain-http address.
+    """
+    ir.async_create_issue(
+        hass,
+        DOMAIN,
+        _https_only_repair_issue_id(entry),
+        is_fixable=False,
+        severity=ir.IssueSeverity.ERROR,
+        translation_key="https_only_server",
+        translation_placeholders={"device": entry.title},
+    )
+
+
+def _clear_https_only_repair(hass: HomeAssistant, entry: MeatPiConfigEntry) -> None:
+    """Clear a previously raised HTTPS-only-server repair issue."""
+    ir.async_delete_issue(hass, DOMAIN, _https_only_repair_issue_id(entry))
+
+
+def _registration_payload(
+    hass: HomeAssistant,
+    entry: MeatPiConfigEntry,
+    post_interval: int,
+) -> dict[str, str | bool | int | list[str]] | None:
+    """Return the payload to register on the device, or None without one.
+
+    Keeps the HTTPS-only repair issue in step with it: raised when Home
+    Assistant's web server has SSL on and this device has no TLS (there is
+    no address to register, and saying so beats leaving every entity
+    unavailable in silence), cleared as soon as a payload can be built.
+    """
+    try:
+        payload = _build_webhook_payload(hass, entry, post_interval)
+    except NoPlainHttpURLError:
+        _LOGGER.warning(
+            "%s cannot push over HTTPS and Home Assistant's web server "
+            "answers over HTTPS only: no webhook registered",
+            entry.title,
+        )
+        _raise_https_only_repair(hass, entry)
+        return None
+    except Exception as err:
+        _LOGGER.warning(
+            "Cannot generate webhook URL payload for %s: %s",
+            entry.entry_id,
+            err,
+        )
+        return None
+    _clear_https_only_repair(hass, entry)
+    return payload
+
+
+# ---- settings in the push reply (2026-11-14) -----------------------------------
+#
+# Home Assistant can only change a device's webhook settings (its webhook
+# addresses and post interval) by calling the device. A car that is asleep
+# when Home Assistant starts, or on LTE without a VPN, cannot be called,
+# although the car itself reaches Home Assistant with every push. A
+# firmware that reads the reply to its own push reports the revision of the
+# settings it holds; when that is not the wanted one, the reply carries the
+# settings (notes/device-contract/PUSH_REPLY_SETTINGS.md).
+
+# What a revision may consist of: the device stores and reports the string
+# as it was given.
+_WEBHOOK_REV_PATTERN = re.compile(rf"[A-Za-z0-9_-]{{0,{WEBHOOK_REV_MAX_LENGTH}}}")
+
+
+def _reported_webhook_rev(data: dict[str, Any]) -> str | None:
+    """Return the settings revision a push reports, or None without one.
+
+    A firmware that reads push replies sends ``status.webhook_rev`` in
+    every push, an empty string while it holds no revision. The key is
+    absent on older firmware and on a device whose webhook the user pinned
+    on the device itself: both are answered as before, without a body.
+    Anything that is not a revision string counts as absent.
+    """
+    status = data.get("status")
+    if not isinstance(status, dict):
+        return None
+    rev = status.get(WEBHOOK_REV_KEY)
+    if not isinstance(rev, str) or _WEBHOOK_REV_PATTERN.fullmatch(rev) is None:
+        return None
+    return rev
+
+
+def _webhook_revision(settings: Mapping[str, object]) -> str:
+    """Return the revision that names one exact set of webhook settings.
+
+    Derived from the settings themselves, so it changes only when they
+    change and is the same after a restart of Home Assistant.
+    """
+    canonical = json.dumps(settings, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode()).hexdigest()[:WEBHOOK_REV_LENGTH]
+
+
+def _remember_reply_support(
+    hass: HomeAssistant,
+    entry: MeatPiConfigEntry,
+    *,
+    reads_reply: bool,
+) -> None:
+    """Keep in the entry whether this device reads push replies.
+
+    The registration at the next start runs before any push: it carries a
+    revision only for a device known to store one.
+    """
+    if bool(entry.data.get(CONF_READS_PUSH_REPLY)) == reads_reply:
+        return
+    hass.config_entries.async_update_entry(
+        entry, data={**entry.data, CONF_READS_PUSH_REPLY: reads_reply},
+    )
+
+
+def _device_is_pushing(runtime: MeatPiRuntimeData) -> bool:
+    """Return True while the device's pushes keep arriving.
+
+    Such a device holds a webhook address that works, whether or not Home
+    Assistant can reach it.
+    """
+    last_push = runtime.coordinator.last_push
+    if last_push is None:
+        return False
+    elapsed = (dt_util.utcnow() - last_push).total_seconds()
+    return elapsed <= runtime.coordinator.staleness_threshold()
+
+
+def _retry_registration_after_push(
+    hass: HomeAssistant, entry: MeatPiConfigEntry,
+) -> None:
+    """Register again on a push when the last registration missed the device.
+
+    For a firmware that does not read push replies: the push shows it is
+    awake, and a registration is the only way to hand it its settings.
+    Rate-limited, since a car on LTE pushes without ever being reachable.
+    """
+    runtime = entry.runtime_data
+    if not runtime.registration_failed:
+        return
+    now = time.monotonic()
+    if (
+        runtime.last_registration_retry != 0.0
+        and now - runtime.last_registration_retry < REGISTRATION_RETRY_INTERVAL
+    ):
+        return
+    runtime.last_registration_retry = now
+    hass.async_create_task(
+        _async_request_webhook_registration(hass, entry, from_push=True),
+    )
+
+
+def _reply_body(
+    hass: HomeAssistant,
+    entry: MeatPiConfigEntry,
+    reported: str,
+) -> bytes | None:
+    """Return the settings to put in the reply to a push, or None.
+
+    ``reported`` is the revision the device holds. The settings go out when
+    it is not the wanted one: at once for a new difference, then at most
+    every PUSH_REPLY_REPEAT_INTERVAL while the same difference remains. The
+    device decides by itself whether it trusts the path a reply arrived
+    on, so one that keeps its settings must not cost data on every push.
+    """
+    runtime = entry.runtime_data
+    state = runtime.push_reply
+    state.reported_rev = reported
+    try:
+        settings = _build_webhook_payload(hass, entry, runtime.post_interval)
+    except Exception as err:
+        # No address to hand out. The registration reports that (the log,
+        # the repair issue); a push every few seconds must not repeat it,
+        # and a failure here must never turn an accepted push into an error.
+        _LOGGER.debug(
+            "No webhook settings for the reply to %s: %s", entry.title, err,
+        )
+        state.wanted_rev = None
+        return None
+
+    wanted = _webhook_revision(settings)
+    state.wanted_rev = wanted
+    if reported == wanted:
+        state.answered = None
+        return None
+
+    pair = (reported, wanted)
+    now = time.monotonic()
+    if (
+        state.answered == pair
+        and now - state.answered_at < PUSH_REPLY_REPEAT_INTERVAL
+    ):
+        return None
+
+    body = json.dumps({"webhook": {**settings, "rev": wanted}}).encode()
+    if len(body) > PUSH_REPLY_MAX_BYTES:
+        _LOGGER.debug(
+            "The webhook settings for %s do not fit a push reply (%d bytes)",
+            entry.title,
+            len(body),
+        )
+        return None
+
+    state.answered = pair
+    state.answered_at = now
+    state.bodies_sent += 1
+    state.last_body_at = dt_util.utcnow().isoformat()
+    _LOGGER.debug(
+        "Webhook settings %s sent to %s in the push reply (it reported %r)",
+        wanted,
+        entry.title,
+        reported,
+    )
+    return body
+
+
+def _answer_accepted_push(
+    hass: HomeAssistant,
+    entry: MeatPiConfigEntry,
+    data: dict[str, Any],
+) -> Response:
+    """Answer a push that passed the identity check.
+
+    The answer is the empty 204 it always was, unless the device reads
+    push replies and does not hold the webhook settings Home Assistant
+    wants it to have: then it is a 200 with those settings.
+    """
+    # A device that pushes holds a webhook address that works: the issue a
+    # failed registration raised no longer describes it.
+    _clear_webhook_repair(hass, entry)
+
+    reported = _reported_webhook_rev(data)
+    _remember_reply_support(hass, entry, reads_reply=reported is not None)
+    if reported is None:
+        _retry_registration_after_push(hass, entry)
+        return Response(status=HTTPStatus.NO_CONTENT)
+
+    body = _reply_body(hass, entry, reported)
+    if body is None:
+        return Response(status=HTTPStatus.NO_CONTENT)
+    return Response(body=body, content_type="application/json")
+
+
+def _note_registration_unreachable(
+    hass: HomeAssistant,
+    entry: MeatPiConfigEntry,
+    runtime: MeatPiRuntimeData,
+    endpoints: str,
+    attempts: int,
+    *,
+    quiet: bool,
+) -> None:
+    """Record that a registration could not reach the device, and say so.
+
+    A device whose pushes keep arriving holds a webhook address that
+    works, and it is handed its settings when it pushes: in the reply, or
+    by a new registration attempt. "The device will not push" would be
+    wrong for it, so only a device that is silent as well gets the error
+    and the repair issue.
+    """
+    runtime.registration_failed = True
+    if quiet or _device_is_pushing(runtime):
+        _LOGGER.log(
+            logging.DEBUG if quiet else logging.INFO,
+            "Could not reach %s to register the webhook (tried %s); it is "
+            "pushing, so its settings follow when it pushes",
+            entry.title,
+            endpoints,
+        )
+        return
+
+    _LOGGER.error(
+        "Failed to register webhook after %d attempts. "
+        "Device may not send updates to Home Assistant. "
+        "Please check: 1) Device is powered on and connected to network, "
+        "2) Home Assistant can reach device at %s, "
+        "3) Device firewall allows connections on port 80",
+        attempts,
+        endpoints,
+    )
+    # The retries can outlive the entry (unload clears the repair issue);
+    # never raise one for an entry that is no longer this lifecycle.
+    if getattr(entry, "runtime_data", None) is runtime:
+        _raise_webhook_repair(hass, entry, endpoints)
+
+
 def _firmware_repair_issue_id(entry: MeatPiConfigEntry) -> str:
     """Return the repair issue id for below-minimum firmware."""
     return f"firmware_update_required_{entry.entry_id}"
@@ -645,6 +1006,9 @@ async def async_setup_entry(  # noqa: C901, PLR0915
         except Exception:
             _LOGGER.warning("Failed to generate webhook_id; setup may fail")
             return False
+
+    _async_setup_services(hass)
+    await _async_register_frontend(hass)
 
     # Load the device catalog (bundled/stored copy applies immediately, a
     # remote refresh runs in the background at most once per day) so
@@ -818,7 +1182,13 @@ async def async_setup_entry(  # noqa: C901, PLR0915
 
         # Keep dispatcher for backward compatibility during migration
         async_dispatcher_send(hass, DOMAIN, webhook_id, data)
-        return Response(status=HTTPStatus.NO_CONTENT)
+        return _answer_accepted_push(hass, entry, data)
+
+    # The webhooks of entries removed earlier answer 410 Gone from here on.
+    # An entry that comes back with its old webhook id (a restored backup)
+    # takes it over again.
+    removed_webhooks = await async_get_removed_webhooks(hass)
+    await removed_webhooks.async_forget(webhook_id)
 
     webhook.async_register(
         hass, DOMAIN, entry.title, webhook_id, handle_webhook,
@@ -863,8 +1233,10 @@ async def async_unload_entry(
     # to pushes.
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unload_ok:
+        _cancel_history_followup(entry.runtime_data)
         webhook.async_unregister(hass, entry.runtime_data.webhook_id)
         _clear_webhook_repair(hass, entry)
+        _clear_https_only_repair(hass, entry)
     return unload_ok
 
 
@@ -874,6 +1246,98 @@ async def async_remove_entry(
     """Clean up persisted state when a config entry is removed for good."""
     ir.async_delete_issue(hass, DOMAIN, _firmware_repair_issue_id(entry))
     await async_remove_history_store(hass, entry)
+    # A device that cannot be told now learns it from the answer to its
+    # next post: the webhook answers 410 Gone from here on.
+    webhook_id = entry.data.get(CONF_WEBHOOK_ID)
+    if isinstance(webhook_id, str) and webhook_id:
+        removed_webhooks = await async_get_removed_webhooks(hass)
+        await removed_webhooks.async_add(webhook_id)
+    # Not awaited: the device may be asleep, and removing the entry must
+    # not wait for a connection attempt to give up.
+    hass.async_create_task(
+        _async_release_device_webhook(hass, entry),
+        f"{DOMAIN} release device webhook {entry.entry_id}",
+    )
+
+
+def _stored_device_base_urls(entry: MeatPiConfigEntry) -> list[str]:
+    """Return the device's addresses as the entry stores them, local first.
+
+    For an entry that is no longer loaded (it has no runtime data).
+    """
+    candidates = (
+        entry.data.get("host"),
+        entry.data.get("mdns"),
+        _http_url_from_host(_validated_vpn_ip(entry.data.get("vpn_ip"))),
+    )
+    unique: list[str] = []
+    for candidate in candidates:
+        if isinstance(candidate, str) and candidate and candidate not in unique:
+            unique.append(candidate)
+    return unique
+
+
+async def _async_release_device_webhook(
+    hass: HomeAssistant, entry: MeatPiConfigEntry,
+) -> bool:
+    """Ask the device of a removed entry to stop posting to its webhook.
+
+    Home Assistant answers a post to a webhook it no longer knows with
+    200, so the device went on posting for good and counted every post
+    as delivered. The device is asked for its settings first and is left
+    alone unless they still name this entry's webhook: it may post to
+    another Home Assistant by now, or to an entry added again since. A
+    webhook pinned on the device (manual override) is the user's own.
+
+    Best effort, never raises: a device that is asleep or away cannot be
+    told here. It learns it from the 410 Gone its next post is answered
+    with (removed_webhooks.py), when its firmware understands that.
+    """
+    webhook_id = entry.data.get(CONF_WEBHOOK_ID)
+    if not isinstance(webhook_id, str) or not webhook_id:
+        return False
+    session = async_get_clientsession(hass)
+    try:
+        async with asyncio.timeout(WEBHOOK_RELEASE_TIMEOUT):
+            for base in _stored_device_base_urls(entry):
+                endpoint = _build_webhook_endpoint(base)
+                if endpoint is None:
+                    continue
+                try:
+                    released = await async_release_webhook_at(
+                        session, endpoint, (webhook_id,),
+                    )
+                except (ClientError, TimeoutError, ValueError) as err:
+                    _LOGGER.debug("No answer about the webhook at %s: %r", endpoint, err)
+                    continue
+                if released is not None:
+                    return released
+    except TimeoutError:
+        _LOGGER.debug("The device of the removed entry %s did not answer in time", entry.title)
+    _LOGGER.info(
+        "The device of the removed entry %s could not be reached: its next "
+        "post is answered with 410 Gone, on which firmware 6.0.0-beta.11 or "
+        "later stops posting",
+        entry.title,
+    )
+    return False
+
+
+async def async_remove_config_entry_device(
+    hass: HomeAssistant,  # noqa: ARG001 - required by Home Assistant
+    entry: MeatPiConfigEntry,
+    device_entry: dr.DeviceEntry,
+) -> bool:
+    """Allow removing a device that is no longer the configured adapter.
+
+    The device is keyed on the adapter's device_id, or on the entry id until
+    the adapter reports one. A device under any other identifier (the entry-id
+    placeholder once the device_id is known, or an adapter that has been
+    replaced) has no entities left and could not be deleted. The current
+    adapter's device stays protected: it would come back on the next post.
+    """
+    current = entry.data.get("device_id") or entry.entry_id
+    return (DOMAIN, current) not in device_entry.identifiers
 
 
 def _normalize_connection_urls(hass: HomeAssistant, entry: MeatPiConfigEntry) -> None:
@@ -910,21 +1374,24 @@ def _schedule_webhook_registration(hass: HomeAssistant, entry: MeatPiConfigEntry
         hass.async_create_task(_async_request_webhook_registration(hass, entry))
         return
 
-    fired = False
+    cancelled = False
 
     @callback
     def _on_started(_: object) -> None:
-        nonlocal fired
-        fired = True
-        hass.async_create_task(_async_request_webhook_registration(hass, entry))
+        if not cancelled:
+            hass.async_create_task(_async_request_webhook_registration(hass, entry))
 
-    unsub = hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STARTED, _on_started)
+    hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STARTED, _on_started)
 
     def _cancel_startup_registration() -> None:
-        # Only unsubscribe if the once-listener has not fired (it removes
-        # itself on fire; removing again would log an error).
-        if not fired:
-            unsub()
+        # A flag, not an unsubscribe: an entry can be unloaded while the
+        # started event is being fired (a rediscovery that changes its
+        # address reloads it). The listener is then already taken for
+        # that event, removing it logged "Unable to remove unknown job
+        # listener" and the registration still ran for the unloaded
+        # entry. The once-listener removes itself when it fires.
+        nonlocal cancelled
+        cancelled = True
 
     entry.async_on_unload(_cancel_startup_registration)
 
@@ -1085,7 +1552,7 @@ async def _async_probe_capabilities(
 
 
 def _schedule_history_sync(hass: HomeAssistant, entry: MeatPiConfigEntry) -> None:
-    """Schedule a history backfill run if enabled, capable, and not rate-limited."""
+    """Schedule a history catch-up run if enabled, capable, and not rate-limited."""
     runtime = getattr(entry, "runtime_data", None)
     if runtime is None:
         return
@@ -1098,20 +1565,87 @@ def _schedule_history_sync(hass: HomeAssistant, entry: MeatPiConfigEntry) -> Non
         runtime.last_history_sync
         and now - runtime.last_history_sync < HISTORY_SYNC_MIN_INTERVAL
     ):
+        # Too soon after the last run (a car home again minutes after the
+        # run at Home Assistant's start, a bench): book it for the end of the
+        # window instead of dropping it, unless a follow-up is already due.
+        if runtime.history_followup is None:
+            _schedule_history_followup(
+                hass, entry, HISTORY_SYNC_MIN_INTERVAL - (now - runtime.last_history_sync),
+            )
         return
     runtime.last_history_sync = now
+    runtime.history_followups = 0
     hass.async_create_task(_async_request_history_sync(hass, entry))
+
+
+def async_request_history_sync_now(hass: HomeAssistant, entry: MeatPiConfigEntry) -> bool:
+    """Run a catch-up on request (the Catch up history button), rate limit aside.
+
+    Returns False when the device has no data logger to read.
+    """
+    runtime = getattr(entry, "runtime_data", None)
+    if runtime is None or not runtime.capabilities.has_component(COMPONENT_DATA_LOGGER):
+        return False
+    runtime.last_history_sync = time.monotonic()
+    runtime.history_followups = 0
+    hass.async_create_task(_async_request_history_sync(hass, entry))
+    return True
+
+
+def _cancel_history_followup(runtime: MeatPiRuntimeData) -> None:
+    if runtime.history_followup is not None:
+        runtime.history_followup()
+        runtime.history_followup = None
+    runtime.history_followup_due = None
+
+
+def _schedule_history_followup(
+    hass: HomeAssistant, entry: MeatPiConfigEntry, delay: float,
+) -> None:
+    """Come back for what one run could not take: the hour still running
+    (imported once it has ended) or a device with more rows than one run
+    reads. One timer per entry, replaced by each run, bounded in a row."""
+    runtime = getattr(entry, "runtime_data", None)
+    if runtime is None:
+        return
+    _cancel_history_followup(runtime)
+    if runtime.history_followups >= HISTORY_MAX_FOLLOWUPS:
+        _LOGGER.warning(
+            "History sync for %s: %d follow-up runs in a row; waiting for the "
+            "next reconnect instead",
+            entry.title,
+            runtime.history_followups,
+        )
+        return
+    runtime.history_followups += 1
+
+    @callback
+    def _fire(_now: Any) -> None:
+        current = getattr(entry, "runtime_data", None)
+        if current is None:
+            return
+        current.history_followup = None
+        current.history_followup_due = None
+        if not entry.options.get(CONF_HISTORY_SYNC, DEFAULT_HISTORY_SYNC):
+            return
+        current.last_history_sync = time.monotonic()
+        hass.async_create_task(_async_request_history_sync(hass, entry))
+
+    runtime.history_followup = async_call_later(hass, delay, _fire)
+    runtime.history_followup_due = time.time() + delay
 
 
 async def _async_request_history_sync(
     hass: HomeAssistant,
     entry: MeatPiConfigEntry,
 ) -> None:
-    """Run a history backfill, coalescing concurrent requests.
+    """Run a history catch-up, coalescing concurrent requests.
 
     Same pattern as webhook registration and the capability probe: one run
     at a time, requests arriving meanwhile fold into a single trailing
-    re-run. The sync itself never raises.
+    re-run. The sync itself never raises. A run that leaves something for
+    later (the hour still running, more rows than it could take) books a
+    follow-up timer.
     """
     runtime = getattr(entry, "runtime_data", None)
     if runtime is None:
@@ -1129,6 +1663,10 @@ async def _async_request_history_sync(
             if current is None:
                 return
             current.last_history_result = result
+            if result.followup_in is not None:
+                _schedule_history_followup(hass, entry, result.followup_in)
+            elif result.ran:
+                current.history_followups = 0
     finally:
         runtime.history_sync_running = False
 
@@ -1136,14 +1674,22 @@ async def _async_request_history_sync(
 async def _async_request_webhook_registration(
     hass: HomeAssistant,
     entry: MeatPiConfigEntry,
+    *,
+    from_push: bool = False,
 ) -> None:
     """Register the webhook on the device, coalescing concurrent requests.
 
     Pushes and option updates can request re-registration faster than one
-    (retried, backed-off) registration attempt completes — for example a
+    (retried, backed-off) registration attempt completes, for example a
     device that alternates between two IP addresses. Run a single registration
     at a time and fold any requests that arrive meanwhile into one trailing
     re-run, so registration attempts can never pile up against the device.
+
+    ``from_push`` marks a request made because the device pushed (its
+    address changed, or its last registration failed). Such a run is quiet:
+    the device is awake and has a webhook address that works, so a failure
+    is no news. A run asked for by anything else stays loud, also when a
+    quiet request is folded into it.
     """
     # The entry may have been unloaded between scheduling and execution;
     # runtime_data is deleted on unload.
@@ -1151,13 +1697,17 @@ async def _async_request_webhook_registration(
     if runtime is None:
         return
     runtime.registration_pending = True
+    if not from_push:
+        runtime.registration_loud = True
     if runtime.registration_running:
         return
     runtime.registration_running = True
     try:
         while runtime.registration_pending:
             runtime.registration_pending = False
-            await _async_register_webhook_on_device(hass, entry)
+            quiet = not runtime.registration_loud
+            runtime.registration_loud = False
+            await _async_register_webhook_on_device(hass, entry, quiet=quiet)
             # A registration attempt can span seconds (retries, backoff);
             # if the entry was unloaded or reloaded meanwhile this loop's
             # lifecycle is over — a new setup schedules its own run.
@@ -1172,8 +1722,15 @@ async def _async_register_webhook_on_device(  # noqa: C901, PLR0912, PLR0915
     hass: HomeAssistant,
     entry: MeatPiConfigEntry,
     max_retries: int = WEBHOOK_MAX_RETRIES,
+    *,
+    quiet: bool = False,
 ) -> bool:
-    """Push webhook URL and interval to the WiCAN device with retry."""
+    """Push webhook URL and interval to the WiCAN device with retry.
+
+    ``quiet`` is a run a push asked for (see
+    _async_request_webhook_registration): a failed attempt is logged at
+    debug level and raises no repair issue.
+    """
     # Hold a local reference: the entry can be unloaded while this
     # function awaits (runtime_data is deleted on unload), and writing
     # to a stale runtime object is harmless while re-reading the entry
@@ -1211,18 +1768,8 @@ async def _async_register_webhook_on_device(  # noqa: C901, PLR0912, PLR0915
     # Get post interval from runtime_data
     post_interval = runtime.post_interval
 
-    try:
-        payload = _build_webhook_payload(
-            hass,
-            entry,
-            post_interval,
-        )
-    except Exception as err:
-        _LOGGER.warning(
-            "Cannot generate webhook URL payload for %s: %s",
-            entry.entry_id,
-            err,
-        )
+    payload = _registration_payload(hass, entry, post_interval)
+    if payload is None:
         return False
 
     _LOGGER.info(
@@ -1231,13 +1778,22 @@ async def _async_register_webhook_on_device(  # noqa: C901, PLR0912, PLR0915
         post_interval,
     )
 
-    # Backfill webhook_url for older entries after successfully building payload.
-    if "webhook_url" not in entry.data:
+    # Keep the stored URL on what is registered now. It is the fallback
+    # for a start without a usable network address, so a URL from an older
+    # server configuration (SSL off, another address) must not stay in it.
+    if entry.data.get("webhook_url") != payload["url"]:
         hass.config_entries.async_update_entry(
             entry,
             data={**entry.data, "webhook_url": payload["url"]},
         )
-        _LOGGER.debug("Backfilled webhook_url for entry %s", entry.entry_id)
+        _LOGGER.debug("Stored webhook_url updated for entry %s", entry.entry_id)
+
+    # A device that reads push replies stores the revision of the settings
+    # it is given and reports it back. Sent only to a device that has
+    # reported one: firmware without the feature never sees the field.
+    if entry.data.get(CONF_READS_PUSH_REPLY):
+        payload = {**payload, "rev": _webhook_revision(payload)}
+    attempt_level = logging.DEBUG if quiet else logging.WARNING
 
     # Use HA's shared session (reuses connections)
     session = async_get_clientsession(hass)
@@ -1327,10 +1883,12 @@ async def _async_register_webhook_on_device(  # noqa: C901, PLR0912, PLR0915
 
                             # Clear any prior "cannot register" repair issue.
                             _clear_webhook_repair(hass, entry)
+                            runtime.registration_failed = False
                             return True
 
                         text = await resp.text()
-                        _LOGGER.warning(
+                        _LOGGER.log(
+                            attempt_level,
                             "Device webhook registration failed with HTTP %d at %s: %s (attempt %d/%d)",
                             resp.status,
                             ep,
@@ -1340,7 +1898,8 @@ async def _async_register_webhook_on_device(  # noqa: C901, PLR0912, PLR0915
                         )
                     except ClientError as err:
                         # Keep trying other endpoints if one fails to resolve/connect
-                        _LOGGER.warning(
+                        _LOGGER.log(
+                            attempt_level,
                             "Device webhook registration connection error at %s: %s (attempt %d/%d)",
                             ep,
                             err,
@@ -1352,7 +1911,8 @@ async def _async_register_webhook_on_device(  # noqa: C901, PLR0912, PLR0915
                 raise _WebhookEndpointsFailedError  # noqa: TRY301
 
         except TimeoutError:
-            _LOGGER.warning(
+            _LOGGER.log(
+                attempt_level,
                 "Device webhook registration timeout after %ds (attempt %d/%d)",
                 WEBHOOK_REGISTRATION_TIMEOUT,
                 attempt + 1,
@@ -1366,14 +1926,16 @@ async def _async_register_webhook_on_device(  # noqa: C901, PLR0912, PLR0915
                 max_retries,
             )
         except ClientResponseError as err:
-            _LOGGER.warning(
+            _LOGGER.log(
+                attempt_level,
                 "Device webhook registration HTTP error: %s (attempt %d/%d)",
                 err,
                 attempt + 1,
                 max_retries,
             )
         except ClientError as err:
-            _LOGGER.warning(
+            _LOGGER.log(
+                attempt_level,
                 "Device webhook registration connection error: %s (attempt %d/%d)",
                 err,
                 attempt + 1,
@@ -1393,35 +1955,213 @@ async def _async_register_webhook_on_device(  # noqa: C901, PLR0912, PLR0915
             await asyncio.sleep(backoff_seconds)
 
     # All retries failed
-    endpoints_str = ", ".join(str(ep) for ep in endpoints)
-    _LOGGER.error(
-        "Failed to register webhook after %d attempts. "
-        "Device may not send updates to Home Assistant. "
-        "Please check: 1) Device is powered on and connected to network, "
-        "2) Home Assistant can reach device at %s, "
-        "3) Device firewall allows connections on port 80",
+    _note_registration_unreachable(
+        hass,
+        entry,
+        runtime,
+        ", ".join(str(ep) for ep in endpoints),
         max_retries,
-        endpoints_str,
+        quiet=quiet,
     )
-    # The retries above can outlive the entry (unload clears the repair
-    # issue); never raise one for an entry that is no longer this lifecycle.
-    if getattr(entry, "runtime_data", None) is runtime:
-        _raise_webhook_repair(hass, entry, endpoints_str)
     return False
 
 
 async def _async_entry_updated(hass: HomeAssistant, entry: MeatPiConfigEntry) -> None:
-    """Handle config entry updates (options) by re-registering the webhook."""
+    """Apply changed options without reloading the entry.
+
+    A new post interval is sent to the device by re-registering the
+    webhook. The keep-last-values option only changes what entities show,
+    so it is applied here in Home Assistant and nothing is sent: that
+    option is typically changed while the device is asleep, when a
+    registration attempt can only fail and raise its repair issue.
+    """
     # The listener can fire while the entry is tearing down (runtime_data
     # is deleted on unload); the reload that follows re-reads the options.
     runtime = getattr(entry, "runtime_data", None)
     if runtime is None:
         return
 
-    # Update post_interval in runtime_data
-    runtime.post_interval = entry.options.get(
-        CONF_POST_INTERVAL, DEFAULT_POST_INTERVAL,
-    )
+    runtime.coordinator.async_options_updated()
+
+    post_interval = entry.options.get(CONF_POST_INTERVAL, DEFAULT_POST_INTERVAL)
+    if post_interval == runtime.post_interval:
+        # The listener also fires for entry data updates (device-reported
+        # info, PID definitions): nothing the device needs to hear about.
+        return
+    runtime.post_interval = post_interval
 
     # Re-register webhook with new interval (coalesced with any in-flight run)
     await _async_request_webhook_registration(hass, entry)
+
+
+# ---- the GPS track (2026-11-06) --------------------------------------------------
+
+SAVE_GPX_SCHEMA = vol.Schema(
+    {
+        vol.Required("device_id"): cv.string,
+        vol.Optional(ATTR_HOURS, default=DEFAULT_GPX_HOURS): vol.All(
+            vol.Coerce(int), vol.Range(min=1, max=MAX_GPX_HOURS),
+        ),
+    },
+)
+
+_GPX_SEGMENT = re.compile(r"<trkseg>.*?</trkseg>", re.DOTALL)
+
+
+def _entry_for_device(hass: HomeAssistant, device_id: str) -> MeatPiConfigEntry:
+    """The loaded MeatPi config entry behind a Home Assistant device id."""
+    device = dr.async_get(hass).async_get(device_id)
+    if device is None:
+        raise HomeAssistantError(
+            translation_domain=DOMAIN, translation_key="device_not_found",
+        )
+    for entry_id in device.config_entries:
+        entry = hass.config_entries.async_get_entry(entry_id)
+        if entry is not None and entry.domain == DOMAIN and getattr(
+            entry, "runtime_data", None,
+        ) is not None:
+            return entry
+    raise HomeAssistantError(
+        translation_domain=DOMAIN, translation_key="device_not_found",
+    )
+
+
+def merge_gpx_documents(documents: list[str]) -> str:
+    """One GPX document out of the device's pages (its scan caps a page).
+
+    The first page's header and track wrapper are kept; the track segments
+    of the later pages are appended before the closing tags. The device's
+    trailing comments are dropped.
+    """
+    if not documents:
+        return ""
+    first = documents[0]
+    first = first[: first.index("</trk>")] if "</trk>" in first else first
+    segments = [
+        seg for doc in documents[1:] for seg in _GPX_SEGMENT.findall(doc)
+    ]
+    return first + "\n".join(segments) + ("\n" if segments else "") + "</trk>\n</gpx>\n"
+
+
+def _write_text(path: str, text: str) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write(text)
+
+
+@callback
+async def _async_register_frontend(hass: HomeAssistant) -> None:
+    """Serve the GPS track card and register it as a frontend resource.
+
+    Once per Home Assistant run: the file under ``www/`` is served at
+    ``/wican-static/wican-gpx-card.js`` and loaded by every frontend, so
+    ``type: custom:wican-gpx-card`` works without a resource entry. The
+    version in the query string defeats a stale browser cache after an
+    update.
+    """
+    if hass.data.get(DATA_FRONTEND_REGISTERED):
+        return
+    http = getattr(hass, "http", None)
+    if http is None or "frontend" not in hass.config.components:
+        # no http or no frontend (a bare test instance, a headless setup):
+        # the card is then a manual resource; neither is forced by the
+        # manifest, a config entry must not start the HTTP server
+        return
+    hass.data[DATA_FRONTEND_REGISTERED] = True
+    # the integration's own view, not a generic static path: the content
+    # type is stated (a browser refuses a module script served as text,
+    # which a Pi's mime table did on the bench, 2026-11-06)
+    http.register_view(WicanStaticView())
+    version = await _async_integration_version(hass)
+    add_extra_js_url(hass, f"{FRONTEND_STATIC_URL}/{GPX_CARD_FILE}?v={version}")
+
+
+class WicanStaticView(HomeAssistantView):
+    """The integration's frontend files (the GPS track card)."""
+
+    url = FRONTEND_STATIC_URL + "/{filename}"
+    name = "wican:static"
+    requires_auth = False
+
+    async def get(self, request: web.Request, filename: str) -> web.StreamResponse:
+        """Serve one of the shipped files; anything else is 404."""
+        if filename != GPX_CARD_FILE:
+            raise web.HTTPNotFound
+        path = Path(__file__).parent / "www" / filename
+        if not path.is_file():
+            raise web.HTTPNotFound
+        return web.FileResponse(
+            path,
+            headers={
+                "Content-Type": "text/javascript; charset=utf-8",
+                "Cache-Control": "no-cache",
+            },
+        )
+
+
+async def _async_integration_version(hass: HomeAssistant) -> str:
+    """The integration's manifest version (for the card's cache key)."""
+    try:
+        integration = await async_get_integration(hass, DOMAIN)
+    except Exception:  # noqa: BLE001
+        return "0"
+    return str(integration.version or "0")
+
+
+def _async_setup_services(hass: HomeAssistant) -> None:
+    """Register the integration's services once (the first entry's setup)."""
+    if hass.services.has_service(DOMAIN, SERVICE_SAVE_GPX):
+        return
+
+    async def _async_save_gpx(call: ServiceCall) -> ServiceResponse:
+        entry = _entry_for_device(hass, call.data["device_id"])
+        api = entry.runtime_data.api
+        if api is None:
+            raise HomeAssistantError(
+                translation_domain=DOMAIN, translation_key="api_not_available",
+            )
+        hours = call.data[ATTR_HOURS]
+        since: str | None = str(int(time.time() - hours * 3600))
+        documents: list[str] = []
+        points = 0
+        for _ in range(GPX_MAX_PAGES):
+            try:
+                page = await api.async_download_gpx(since, limit=GPX_PAGE_POINTS)
+            except MeatPiApiError as err:
+                raise HomeAssistantError(
+                    translation_domain=DOMAIN,
+                    translation_key="api_command_failed",
+                    translation_placeholders={"error": str(err)},
+                ) from err
+            if page is None:
+                raise HomeAssistantError(
+                    translation_domain=DOMAIN, translation_key="gpx_not_supported",
+                )
+            if page.unsupported_format:
+                raise HomeAssistantError(
+                    translation_domain=DOMAIN, translation_key="gpx_log_format",
+                )
+            documents.append(page.text)
+            points += page.points
+            if not page.more or not page.cursor or page.cursor == since:
+                break
+            since = page.cursor
+        if points == 0:
+            raise HomeAssistantError(
+                translation_domain=DOMAIN, translation_key="gpx_no_points",
+                translation_placeholders={"hours": str(hours)},
+            )
+        device_tag = str(entry.data.get("device_id") or entry.entry_id)
+        name = f"{device_tag}_{time.strftime('%Y%m%d_%H%M%S', time.gmtime())}.gpx"
+        path = hass.config.path("www", GPX_DIR, name)
+        await hass.async_add_executor_job(_write_text, path, merge_gpx_documents(documents))
+        _LOGGER.info("GPS track of %s saved: %s (%d points)", entry.title, path, points)
+        return {"path": path, "url": f"/local/{GPX_DIR}/{name}", "points": points, "hours": hours}
+
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_SAVE_GPX,
+        _async_save_gpx,
+        schema=SAVE_GPX_SCHEMA,
+        supports_response=SupportsResponse.OPTIONAL,
+    )

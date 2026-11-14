@@ -4,14 +4,26 @@ Comprehensive test suite for the MeatPi (WiCAN) Home Assistant integration.
 
 Key building blocks:
 
-- `device_sim.py` — the multi-device-type simulator: `DEVICE_PRESETS`
+- `device_sim.py`: the multi-device-type simulator. `DEVICE_PRESETS`
   (legacy WiCAN, V6 WiCAN Pro/USB, ESPNetlink, generic MeatPi) plus
   `SimulatedDeviceApi`, the device-side HTTP surface with programmable
-  failure modes (offline/timeout/403/500/garbage) and data-logger routes.
+  failure modes (offline/timeout/403/500/garbage) and data-logger routes,
+  and `SimulatedWebhookFirmware`, the webhook settings a device holds: a
+  firmware that reads push replies or one that does not, a reply the
+  device does not trust, a webhook pinned on the device.
 - `test_device_type_matrix.py` — per-device-type end-to-end scenarios
   (telemetry, control buttons, OTA lifecycle, failure injection).
 - `test_history*.py` — the SD-card history backfill: unit, end-to-end,
   hardening, and real in-memory-recorder round-trips.
+- `test_keep_last_values.py` — what entities show while the device is away:
+  the keep-last-values option, the Connected sensor, and a device that went
+  quiet across a Home Assistant restart.
+- `test_unreachable_device.py`: a device that pushes but that Home
+  Assistant cannot reach (asleep at start, on LTE). The repair issue closes
+  with a push and the settings still arrive.
+- `test_push_reply.py`: settings in the push reply. The revision, when a
+  body is sent, the five-minute repeat, a pinned device, the revision in a
+  registration, quiet registrations after a push, diagnostics.
 - `test_device_simulation.py` / `test_device_chaos.py` /
   `test_hardening.py` — the hardened-telemetry and failure-injection
   suites.
@@ -24,6 +36,10 @@ lists the required test coverage).
 ```bash
 pip install -r requirements_test.txt
 ```
+
+The list includes `home-assistant-frontend`: the tests of the GPS track card
+(`test_frontend_card.py`) set the frontend up, and three of them are skipped
+where the package is missing.
 
 ## Running Tests
 

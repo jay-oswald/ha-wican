@@ -10,12 +10,13 @@ from __future__ import annotations
 import asyncio
 from decimal import Decimal
 from http import HTTPStatus
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, patch
 
 from homeassistant.const import EVENT_HOMEASSISTANT_STARTED
-from homeassistant.core import CoreState, HomeAssistant
+from homeassistant.core import CoreState, HomeAssistant, callback
 from homeassistant.helpers.dispatcher import async_dispatcher_send
+from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.wican import _async_request_webhook_registration
 from custom_components.wican.const import DOMAIN
@@ -27,6 +28,9 @@ from custom_components.wican.sensor import (
     _trimmed_pid_config,
 )
 from tests.device_sim import MeatPiDeviceSimulator
+
+if TYPE_CHECKING:
+    import pytest
 
 # ===================================================================
 # Coordinator guards
@@ -291,6 +295,47 @@ async def test_unload_before_startup_cancels_deferred_registration(
         await hass.async_block_till_done()
 
     # The listener was removed on unload: nothing fires.
+    assert register.await_count == 0
+
+
+async def test_unload_while_the_started_event_fires_is_quiet(
+    hass: HomeAssistant, hass_client: Any, caplog: pytest.LogCaptureFixture,
+) -> None:
+    """An entry unloaded by another listener of the started event stays quiet.
+
+    A rediscovery that changes the entry's address reloads it while Home
+    Assistant fires its started event. The deferred registration's listener
+    was then removed although it was already taken for that event: an
+    "Unable to remove unknown job listener" error at every start (seen on
+    real instances), and the registration ran for the unloaded entry.
+    """
+    hass.set_state(CoreState.not_running)
+    cancel: list[Any] = []
+
+    @callback
+    def _unload_first(_event: Any) -> None:
+        # Listening before the entry is set up, so called before the
+        # integration's own listener: what an unload runs at its end.
+        for run in cancel:
+            run()
+
+    hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STARTED, _unload_first)
+    device = MeatPiDeviceSimulator(hass, hass_client)
+    with patch.object(
+        MockConfigEntry, "async_on_unload", autospec=True,
+        side_effect=lambda _entry, func: cancel.append(func),
+    ):
+        await device.async_setup()
+
+    register = AsyncMock(return_value=True)
+    with patch(
+        "custom_components.wican._async_register_webhook_on_device", register,
+    ):
+        hass.set_state(CoreState.running)
+        hass.bus.async_fire(EVENT_HOMEASSISTANT_STARTED)
+        await hass.async_block_till_done()
+
+    assert "Unable to remove unknown job listener" not in caplog.text
     assert register.await_count == 0
 
 

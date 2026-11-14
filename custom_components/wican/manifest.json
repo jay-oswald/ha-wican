@@ -2,7 +2,9 @@
   "domain": "wican",
   "name": "MeatPi",
   "after_dependencies": [
-    "recorder"
+    "recorder",
+    "http",
+    "frontend"
   ],
   "codeowners": [
     "@meatpiHQ",

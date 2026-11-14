@@ -1,150 +1,192 @@
 {
-    "config": {
-      "step": {
-        "user": {
-          "title": "Set up MeatPi device",
-          "description": "MeatPi devices (WiCAN and future products) are usually discovered automatically. Use manual setup only if automatic discovery failed.\n\nEnter the hostname or IP address of your device.",
-          "data": {
-            "mdns": "Hostname or IP address",
-            "host": "Alternative IP (optional)"
-          },
-          "data_description": {
-            "mdns": "The mDNS hostname (e.g. wican_xxxx.local) or IP address that Home Assistant uses to reach the device.",
-            "host": "An optional alternative IP address to try if the hostname cannot be resolved."
-          }
+  "config": {
+    "flow_title": "{name}",
+    "step": {
+      "user": {
+        "title": "Set up MeatPi device",
+        "description": "MeatPi devices (WiCAN and future products) are usually discovered automatically. Use manual setup only if automatic discovery failed.\n\nEnter the hostname or IP address of your device.",
+        "data": {
+          "mdns": "Hostname or IP address",
+          "host": "Alternative IP (optional)"
         },
-        "reconfigure": {
-          "title": "Reconfigure MeatPi device",
-          "description": "Update the address Home Assistant uses to reach this device.",
-          "data": {
-            "mdns": "Hostname or IP address",
-            "host": "Alternative IP (optional)"
-          },
-          "data_description": {
-            "mdns": "The mDNS hostname (e.g. wican_xxxx.local) or IP address that Home Assistant uses to reach the device.",
-            "host": "An optional alternative IP address to try if the hostname cannot be resolved."
-          }
-        },
-        "zeroconf_confirm": {
-          "title": "Discovered MeatPi device",
-          "description": "Do you want to add the MeatPi device **{name}** at `{url}` to Home Assistant?"
+        "data_description": {
+          "mdns": "The mDNS hostname (e.g. wican_xxxx.local) or IP address that Home Assistant uses to reach the device.",
+          "host": "An optional alternative IP address to try if the hostname cannot be resolved."
         }
       },
-      "abort": {
-        "already_configured": "[%key:common::config_flow::abort::already_configured_device%]",
-        "reconfigure_successful": "[%key:common::config_flow::abort::reconfigure_successful%]",
-        "no_host": "The discovered device did not provide a usable network address.",
-        "not_wican": "The discovered service is not a MeatPi device.",
-        "no_url_available": "Home Assistant has no HTTP address the device could push to. Set the internal URL under Settings > System > Network, then retry setup."
+      "reconfigure": {
+        "title": "Reconfigure MeatPi device",
+        "description": "Update the address Home Assistant uses to reach this device.",
+        "data": {
+          "mdns": "Hostname or IP address",
+          "host": "Alternative IP (optional)"
+        },
+        "data_description": {
+          "mdns": "The mDNS hostname (e.g. wican_xxxx.local) or IP address that Home Assistant uses to reach the device.",
+          "host": "An optional alternative IP address to try if the hostname cannot be resolved."
+        }
       },
-      "create_entry": {
-        "default": "To send events to Home Assistant, you will need to set up a webhook.\n\nOpen the device's web interface and go to *Settings → Services → Automation → Webhooks*\n\nEnable *Webhooks* and fill in the following webhook in the URL field:\n\n`{webhook_url}`\n\nHome Assistant also registers this automatically when it can reach the device. See [the documentation]({docs_url}) for further details."
-      },
-      "error": {
-        "device_mismatch": "Device ID mismatch. Expected {expected}, got {actual}. The device may have been replaced or the configuration is pointing to a different device. Please delete and reconfigure this integration.",
-        "unknown": "Unknown error occurred"
+      "zeroconf_confirm": {
+        "title": "Discovered MeatPi device",
+        "description": "Do you want to add the MeatPi device **{name}** at `{url}` to Home Assistant?"
       }
     },
-    "options": {
-      "step": {
-        "init": {
-          "data": {
-            "post_interval": "Post interval (seconds)",
-            "history_sync": "Backfill history from the device log"
-          },
-          "data_description": {
-            "post_interval": "How often the device pushes data to Home Assistant.",
-            "history_sync": "When the device reconnects after being away, import the data it logged to its SD card into each sensor's long-term statistics (hourly resolution). Requires the data logger to be enabled on the device."
-          }
+    "abort": {
+      "already_configured": "[%key:common::config_flow::abort::already_configured_device%]",
+      "reconfigure_successful": "[%key:common::config_flow::abort::reconfigure_successful%]",
+      "no_host": "The discovered device did not provide a usable network address.",
+      "not_wican": "The discovered service is not a MeatPi device.",
+      "no_url_available": "Home Assistant has no address the device could push to. Check that Home Assistant is connected to the network, or set the Local network URL under Settings > System > Network, then retry setup."
+    },
+    "create_entry": {
+      "default": "To send events to Home Assistant, you will need to set up a webhook.\n\nOpen the device's web interface and go to *Settings → Services → Automation → Webhooks*\n\nEnable *Webhooks* and fill in the following webhook in the URL field:\n\n`{webhook_url}`\n\nHome Assistant also registers this automatically when it can reach the device. See [the documentation]({docs_url}) for further details."
+    },
+    "error": {
+      "device_mismatch": "Device ID mismatch. Expected {expected}, got {actual}. The device may have been replaced or the configuration is pointing to a different device. Please delete and reconfigure this integration.",
+      "unknown": "Unknown error occurred"
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "data": {
+          "post_interval": "Post interval (seconds)",
+          "history_sync": "Catch up history from the device log (store and forward)",
+          "history_prefer_live": "Keep the live statistics of hours the device also recorded",
+          "keep_last_values": "Keep the last values while the device is offline"
+        },
+        "data_description": {
+          "post_interval": "How often the device pushes data to Home Assistant.",
+          "history_sync": "When the device reconnects after being away, the hours it recorded on its SD card are imported into each sensor's long-term statistics (hourly resolution). Needs Store and forward on the device (Automate > Home Assistant).",
+          "history_prefer_live": "Off: the recorded hours replace what the live pushes left of the same hour, so the drive's last hour is complete. On: an hour Home Assistant already has is never touched.",
+          "keep_last_values": "Off: the sensors and the location show as unavailable once the device stops sending data (asleep, out of Wi-Fi range). On: they keep their last received value, and the Connected and Last seen sensors tell how current it is. A car that drives out of range keeps showing its last speed and RPM until it is back. ECU Online, Bluetooth Enabled and the device buttons follow the device either way."
         }
       }
-    },
-    "entity": {
-      "sensor": {
-        "wifi_mode": {
-          "name": "WiFi Mode"
-        },
-        "batt_voltage": {
-          "name": "Battery Voltage"
-        },
-        "vpn_status": {
-          "name": "VPN Status"
-        },
-        "uptime": {
-          "name": "Uptime"
-        }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "wifi_mode": {
+        "name": "WiFi Mode"
       },
-      "binary_sensor": {
-        "ble_status": {
-          "name": "Bluetooth Enabled"
-        },
-        "ecu_status": {
-          "name": "ECU Online"
-        }
+      "batt_voltage": {
+        "name": "Battery Voltage"
       },
-      "button": {
-        "restart": {
-          "name": "Restart"
-        },
-        "sync_time": {
-          "name": "Sync time"
-        },
-        "refresh_definitions": {
-          "name": "Refresh integration definitions"
-        }
+      "vpn_status": {
+        "name": "VPN Status"
       },
-      "device_tracker": {
-        "location": {
-          "name": "Location"
-        }
-      },
-      "update": {
-        "firmware": {
-          "name": "Firmware"
-        }
+      "uptime": {
+        "name": "Uptime"
       }
     },
-    "issues": {
-      "firmware_update_required": {
-        "title": "Firmware update required for {device}",
-        "description": "The device \"{device}\" runs firmware {installed}, below the minimum this integration supports ({minimum}).\n\nTelemetry keeps working, but device support below the minimum is no longer maintained and some features will not work correctly.\n\nUpdate the firmware from the device page (the Firmware update entity) or the device's web interface. This issue clears automatically once the device reports a supported version."
+    "binary_sensor": {
+      "ble_status": {
+        "name": "Bluetooth Enabled"
       },
-      "webhook_registration_failed": {
-        "title": "MeatPi device unreachable",
-        "description": "Home Assistant could not register its webhook with the device \"{device}\" after several attempts (tried: {endpoints}).\n\nUntil this is resolved the device will not push updates. Please check that:\n\n1. The device is powered on and connected to the network.\n2. Home Assistant can reach the device at the address above.\n3. The device firewall allows connections on port 80.\n\nThe issue clears automatically once registration succeeds."
+      "ecu_status": {
+        "name": "ECU Online"
+      },
+      "connected": {
+        "name": "Connected"
       }
     },
-    "exceptions": {
-      "api_not_available": {
-        "message": "The device control API is not available. The device may be offline or running firmware without HTTP API support."
+    "button": {
+      "restart": {
+        "name": "Restart"
       },
-      "api_command_failed": {
-        "message": "Sending the command to the device failed: {error}"
+      "sync_time": {
+        "name": "Sync time"
       },
-      "definitions_refresh_failed": {
-        "message": "Could not fetch updated definitions from GitHub. Check the internet connection and try again."
+      "refresh_definitions": {
+        "name": "Refresh integration definitions"
       },
-      "device_mismatch": {
-        "message": "Device ID mismatch. Expected {expected}, got {actual}. The device may have been replaced or the configuration points to a different device."
-      },
-      "no_firmware_version": {
-        "message": "No firmware version is available to install."
-      },
-      "firmware_download_failed": {
-        "message": "Failed to download firmware from GitHub: {error}"
-      },
-      "firmware_upload_failed": {
-        "message": "Failed to upload firmware to device: {error}"
-      },
-      "version_not_found": {
-        "message": "Firmware version {version} not found in GitHub releases"
-      },
-      "device_unreachable": {
-        "message": "Cannot reach device at {host} for firmware update"
-      },
-      "update_in_progress": {
-        "message": "A firmware update is already in progress"
+      "catch_up_history": {
+        "name": "Catch up history"
+      }
+    },
+    "device_tracker": {
+      "location": {
+        "name": "Location"
+      }
+    },
+    "update": {
+      "firmware": {
+        "name": "Firmware"
+      }
+    }
+  },
+  "issues": {
+    "firmware_update_required": {
+      "title": "Firmware update required for {device}",
+      "description": "The device \"{device}\" runs firmware {installed}, below the minimum this integration supports ({minimum}).\n\nTelemetry keeps working, but device support below the minimum is no longer maintained and some features will not work correctly.\n\nUpdate the firmware from the device page (the Firmware update entity) or the device's web interface. This issue clears automatically once the device reports a supported version."
+    },
+    "webhook_registration_failed": {
+      "title": "MeatPi device unreachable",
+      "description": "Home Assistant could not reach the device \"{device}\" to register its webhook (tried: {endpoints}), and the device is not sending data either.\n\nPlease check that:\n\n1. The device is powered on and connected to the network.\n2. Home Assistant can reach the device at the address above.\n3. The device firewall allows connections on port 80.\n\nA device that is asleep needs no action: the issue clears automatically once the device sends data again or the registration succeeds."
+    },
+    "https_only_server": {
+      "title": "{device} cannot push to Home Assistant over HTTPS",
+      "description": "Home Assistant's own web server has SSL turned on (`ssl_certificate` under `http:` in configuration.yaml), so it answers over HTTPS only. The device \"{device}\" has no HTTPS support and can only push to a plain http address, so its data cannot reach Home Assistant and its entities stay unavailable.\n\nTo use this device, let a reverse proxy serve HTTPS (for example the NGINX Home Assistant SSL proxy add-on) and leave Home Assistant's own web server on plain http. A WiCAN PRO is not affected: it pushes over HTTPS.\n\nThe issue clears automatically once Home Assistant has a plain http address again."
+    }
+  },
+  "exceptions": {
+    "api_not_available": {
+      "message": "The device control API is not available. The device may be offline or running firmware without HTTP API support."
+    },
+    "api_command_failed": {
+      "message": "Sending the command to the device failed: {error}"
+    },
+    "definitions_refresh_failed": {
+      "message": "Could not fetch updated definitions from GitHub. Check the internet connection and try again."
+    },
+    "device_mismatch": {
+      "message": "Device ID mismatch. Expected {expected}, got {actual}. The device may have been replaced or the configuration points to a different device."
+    },
+    "no_firmware_version": {
+      "message": "No firmware version is available to install."
+    },
+    "firmware_download_failed": {
+      "message": "Failed to download firmware from GitHub: {error}"
+    },
+    "firmware_upload_failed": {
+      "message": "Failed to upload firmware to device: {error}"
+    },
+    "version_not_found": {
+      "message": "Firmware version {version} not found in GitHub releases"
+    },
+    "device_unreachable": {
+      "message": "Cannot reach device at {host} for firmware update"
+    },
+    "update_in_progress": {
+      "message": "A firmware update is already in progress"
+    },
+    "device_not_found": {
+      "message": "That device is not a loaded MeatPi device."
+    },
+    "gpx_not_supported": {
+      "message": "The device's firmware has no GPS track route (needs the 2026-11 firmware)."
+    },
+    "gpx_log_format": {
+      "message": "The device's parameter log is not JSON lines or CSV: turn on Store and forward on the device (Automate > Home Assistant)."
+    },
+    "gpx_no_points": {
+      "message": "No GPS fix was recorded in the last {hours} hour(s). The GPS parameters are recorded with Store and forward on the device."
+    }
+  },
+  "services": {
+    "save_gpx": {
+      "name": "Save GPS track (GPX)",
+      "description": "Writes the GPS fix the device recorded on its SD card (Store and forward) as a GPX track under www/wican and returns its address: /local/wican/ followed by the file name. Hourly statistics cannot hold a position; this is the time series.",
+      "fields": {
+        "device_id": {
+          "name": "Device",
+          "description": "The MeatPi device whose track to save."
+        },
+        "hours": {
+          "name": "Hours back",
+          "description": "How many hours back the track reaches, up to 30 days."
+        }
       }
     }
   }
-  
+}

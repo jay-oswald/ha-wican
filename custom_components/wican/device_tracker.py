@@ -25,6 +25,7 @@ from .const import (
     MIN_GPS_LATITUDE,
     MIN_GPS_LONGITUDE,
 )
+from .coordinator import MeatPiDataUpdateCoordinator
 
 if TYPE_CHECKING:
     from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -66,7 +67,9 @@ async def async_setup_entry(
     _LOGGER.debug("Device tracker entity created for %s", config_entry.title)
 
 
-class MeatPiDeviceTrackerEntity(CoordinatorEntity, TrackerEntity, RestoreEntity):
+class MeatPiDeviceTrackerEntity(
+    CoordinatorEntity[MeatPiDataUpdateCoordinator], TrackerEntity, RestoreEntity,
+):
     """Represents the GPS location of the WiCAN device.
 
     This entity tracks the physical location of the WiCAN device using
@@ -172,10 +175,13 @@ class MeatPiDeviceTrackerEntity(CoordinatorEntity, TrackerEntity, RestoreEntity)
     def available(self) -> bool:
         """Return if entity is available.
 
-        Entity is available if we have valid GPS coordinates.
+        Entity is available if we have valid GPS coordinates and the
+        device is pushing. With the keep-last-values option on, the last
+        known location stays while the device is away: where a parked
+        car is matters most exactly then.
         """
         return (
-            self.coordinator.last_update_success
+            (self.coordinator.last_update_success or self.coordinator.keep_last_values)
             and self._attr_latitude is not None
             and self._attr_longitude is not None
         )
@@ -186,14 +192,16 @@ class MeatPiDeviceTrackerEntity(CoordinatorEntity, TrackerEntity, RestoreEntity)
         data = self.coordinator.data or {}
         gps_data = data.get("gps", {})
 
-        if not isinstance(gps_data, dict) or not gps_data:
-            # No usable GPS data available
+        if isinstance(gps_data, dict) and gps_data:
+            # Every field is parsed independently so one malformed field can
+            # never take the others (or the whole tracker) down with it.
+            self._apply_gps_fix(gps_data)
+        else:
             _LOGGER.debug("No GPS data in coordinator update")
-            return
 
-        # Every field is parsed independently so one malformed field can never
-        # take the others (or the whole tracker) down with it.
-        self._apply_gps_fix(gps_data)
+        # Written even without a fix in this notification: availability
+        # flips (the staleness health-check, the keep-last-values option)
+        # must render on a tracker showing a restored location too.
         self.async_write_ha_state()
 
     def _apply_gps_fix(self, gps_data: dict[str, Any]) -> None:

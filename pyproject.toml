@@ -53,6 +53,7 @@ markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
     "integration: marks tests as integration tests",
     "unit: marks tests as unit tests",
+    "real_webhook_registration: runs the real webhook registration instead of the conftest mock",
 ]
 filterwarnings = [
     # Custom integration warnings can be added here

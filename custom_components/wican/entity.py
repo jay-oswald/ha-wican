@@ -24,6 +24,12 @@ class MeatPiEntity(CoordinatorEntity[MeatPiDataUpdateCoordinator]):
 
     _attr_has_entity_name = True
 
+    # Entities that carry a device reading set this. With the
+    # keep-last-values option on they stay available on their last value
+    # while the device is away. Entities that act on the device or describe
+    # its live links leave it off and always follow the device.
+    _keeps_last_value = False
+
     def __init__(
         self,
         config_entry: MeatPiConfigEntry,
@@ -81,6 +87,13 @@ class MeatPiEntity(CoordinatorEntity[MeatPiDataUpdateCoordinator]):
         """Handle updated data from the coordinator."""
         # Default implementation - subclasses should override this
         self.async_write_ha_state()
+
+    @property
+    def available(self) -> bool:
+        """Follow the device, unless this entity keeps its last value."""
+        return super().available or (
+            self._keeps_last_value and self.coordinator.keep_last_values
+        )
 
     @property
     def device_info(self) -> DeviceInfo:

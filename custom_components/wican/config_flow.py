@@ -16,9 +16,13 @@ from yarl import URL
 
 from .const import (
     CONF_DEVICE_TYPE,
+    CONF_HISTORY_PREFER_LIVE,
     CONF_HISTORY_SYNC,
+    CONF_KEEP_LAST_VALUES,
     CONF_POST_INTERVAL,
+    DEFAULT_HISTORY_PREFER_LIVE,
     DEFAULT_HISTORY_SYNC,
+    DEFAULT_KEEP_LAST_VALUES,
     DEFAULT_POST_INTERVAL,
     DOMAIN,
     MAX_POST_INTERVAL,
@@ -26,6 +30,7 @@ from .const import (
 )
 from .devices import DEVICE_TYPE_GENERIC, is_known_device_type
 from .helpers import resolve_webhook_url
+from .removed_webhooks import async_get_removed_webhooks
 
 if TYPE_CHECKING:
     from ipaddress import IPv4Address, IPv6Address
@@ -169,9 +174,11 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     require_current_request=True,
                 )
             except NoURLAvailableError:
-                # E.g. setting up via Nabu Casa cloud with no internal URL
-                # configured: the device needs a plain-http URL to push to.
-                # A friendly abort beats "Unknown error occurred".
+                # This instance has no address at all a device could push
+                # to (no network address yet and no URL configured). A
+                # web server with SSL on does not end here: the resolver
+                # hands out its https address. A friendly abort beats
+                # "Unknown error occurred".
                 return self.async_abort(reason="no_url_available")
             entry_data = {
                 CONF_WEBHOOK_ID: webhook_id,
@@ -205,7 +212,13 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         properties = discovery_info.properties or {}
         host = discovery_info.host
         host_ip = _string_ip(discovery_info.ip_address)
-        hostname = getattr(discovery_info, "hostname", "") or ""
+        # Zeroconf gives the host name as a fully qualified one, with a
+        # trailing dot ("wican_<id>.local."); the device reports its own
+        # address without it. Stored with the dot, every push changed the
+        # address back and every start of Home Assistant changed it again:
+        # a reload and two more registrations per start, and a dot at the
+        # end of the entry's title.
+        hostname = (getattr(discovery_info, "hostname", "") or "").rstrip(".")
         port = discovery_info.port
 
         if not host and not host_ip:
@@ -290,6 +303,17 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self.discovered_mac = mac_address
         self.discovered_device_id = device_id
         self.discovered_device_type = device_type
+        # A device discovered while it still posts to an entry removed here
+        # is answered 410 Gone. With no entry left nothing else loads the
+        # removed webhooks after a restart of Home Assistant.
+        await async_get_removed_webhooks(self.hass)
+
+        # The card on the integrations page: without a name every discovered
+        # device stood there under the integration's name alone, and two
+        # devices could only be told apart by opening each.
+        self.context["title_placeholders"] = {
+            "name": self.discovered_name or "MeatPi device",
+        }
 
         return await self.async_step_zeroconf_confirm()
 
@@ -412,6 +436,18 @@ class MeatPiOptionsFlow(config_entries.OptionsFlow):
                 vol.Required(
                     CONF_HISTORY_SYNC,
                     default=options.get(CONF_HISTORY_SYNC, DEFAULT_HISTORY_SYNC),
+                ): bool,
+                vol.Required(
+                    CONF_HISTORY_PREFER_LIVE,
+                    default=options.get(
+                        CONF_HISTORY_PREFER_LIVE, DEFAULT_HISTORY_PREFER_LIVE,
+                    ),
+                ): bool,
+                vol.Required(
+                    CONF_KEEP_LAST_VALUES,
+                    default=options.get(
+                        CONF_KEEP_LAST_VALUES, DEFAULT_KEEP_LAST_VALUES,
+                    ),
                 ): bool,
             },
         )

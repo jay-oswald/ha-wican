@@ -14,7 +14,11 @@ from homeassistant.components.sensor import (
     SensorDeviceClass,
     SensorStateClass,
 )
-from homeassistant.components.sensor.const import NON_NUMERIC_DEVICE_CLASSES
+from homeassistant.components.sensor.const import (
+    DEVICE_CLASS_STATE_CLASSES,
+    DEVICE_CLASS_UNITS,
+    NON_NUMERIC_DEVICE_CLASSES,
+)
 from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
@@ -23,9 +27,11 @@ from homeassistant.util import dt as dt_util
 from .attributes import SENSOR_DESCRIPTIONS, MeatPiSensorEntityDescription, get_sensor_attributes
 from .const import (
     DOMAIN,
+    LAST_SEEN_KEY,
     MAX_DYNAMIC_PID_SENSORS,
     MAX_PID_CONFIG_FIELD_LENGTH,
     MAX_PID_KEY_LENGTH,
+    PID_VALUE_DECIMALS,
 )
 from .entity import MeatPiEntity
 from .param_loader import (
@@ -34,6 +40,11 @@ from .param_loader import (
     get_param_unit,
     is_valid_class_unit_combo,
     is_valid_device_class,
+)
+from .pid_config import (
+    PidConfigTables,
+    home_assistant_unit,
+    trimmed_pid_config as _trimmed_pid_config,
 )
 
 if TYPE_CHECKING:
@@ -96,6 +107,31 @@ def _get_pid_icon(
     if device_class is not None:
         device_class_str = device_class.value if isinstance(device_class, SensorDeviceClass) else str(device_class)
     return get_param_icon(pid_key, device_class_str)
+
+
+def _class_with_a_unit_of_its_own(
+    device_class: str | SensorDeviceClass | None,
+    unit: str | None,
+    pid_key: str | None,
+) -> SensorDeviceClass | None:
+    """Return the class when Home Assistant takes it with this unit.
+
+    Home Assistant's own table has the last word. A class with a unit it
+    does not list for that class, or with no unit where the class wants
+    one, is a warning in its log at the sensor's first state (the
+    firmware's standard PID table has such pairs: a ratio as gas, a
+    percentage as volume_storage).
+    """
+    if not isinstance(device_class, SensorDeviceClass):
+        return None
+    allowed_units = DEVICE_CLASS_UNITS.get(device_class)
+    if allowed_units is not None and unit not in allowed_units:
+        _LOGGER.debug(
+            "Home Assistant does not take %s with the unit %r for %s, dropping device_class",
+            device_class.value, unit, pid_key or "sensor",
+        )
+        return None
+    return device_class
 
 
 def _normalize_device_class(
@@ -171,7 +207,7 @@ def _normalize_device_class(
             )
             return None
 
-    return device_class
+    return _class_with_a_unit_of_its_own(device_class, unit, pid_key)
 
 
 # High-cardinality / verbose PID keys that should be created disabled by default
@@ -197,22 +233,6 @@ def _is_usable_pid_key(pid_key: Any) -> bool:
     )
 
 
-def _trimmed_pid_config(config: Any) -> dict[str, str]:
-    """Reduce a device-reported per-PID config to the fields we persist.
-
-    Only ``unit`` and ``class`` are ever read back, and the config entry is
-    written to disk, so cap what a misbehaving device can store there.
-    """
-    if not isinstance(config, dict):
-        return {}
-    trimmed: dict[str, str] = {}
-    for config_field in ("unit", "class"):
-        value = config.get(config_field)
-        if isinstance(value, str) and value and len(value) <= MAX_PID_CONFIG_FIELD_LENGTH:
-            trimmed[config_field] = value
-    return trimmed
-
-
 def _build_pid_entity_description(
     pid_key: str,
     config: Any,
@@ -220,10 +240,24 @@ def _build_pid_entity_description(
     """Build the entity description for a PID sensor from device config."""
     if not isinstance(config, dict):
         config = {}
-    # Use _get_pid_unit with config unit for consistent fallback handling
-    unit = _get_pid_unit(pid_key, config.get("unit"))
+    # Use _get_pid_unit with config unit for consistent fallback handling.
+    # The stored unit stays as the device spelled it; the sensor gets
+    # Home Assistant's spelling ("degC" is its "°C").
+    unit = home_assistant_unit(_get_pid_unit(pid_key, config.get("unit")))
     device_class = _normalize_device_class(config.get("class"), unit, pid_key)
     icon = _get_pid_icon(pid_key, device_class)
+    # A PID sensor is a measurement once it has shown a number. Home
+    # Assistant takes some classes only as a total (energy, gas, water,
+    # volume): with one of those every sensor is a warning in its log.
+    # The class is left out; the unit and the icon stay.
+    if device_class is not None:
+        state_classes = DEVICE_CLASS_STATE_CLASSES.get(device_class)
+        if state_classes is not None and SensorStateClass.MEASUREMENT not in state_classes:
+            _LOGGER.debug(
+                "Home Assistant takes %s only as a total, dropping device_class for %s",
+                device_class.value, pid_key,
+            )
+            device_class = None
 
     _LOGGER.debug(
         "PID sensor %s described with unit=%s, device_class=%s, icon=%s",
@@ -270,6 +304,14 @@ def _coerce_numeric_value(value: Any) -> int | float | None:
 
 
 DYNAMIC_PID_SENSORS: dict[str, dict[str, MeatPiPidSensorEntity]] = {}
+
+# What each loaded entry's device has said about its PID sensors (the
+# config section of its pushes), kept between pushes: see pid_config.py.
+PID_CONFIG_TABLES: dict[str, PidConfigTables] = {}
+
+# The fix's coordinates are sensors too, and every decimal of a degree
+# counts (the fifth is a metre).
+_UNROUNDED_PID_KEYS: frozenset[str] = frozenset({"gps_latitude", "gps_longitude"})
 
 # Entries that have already logged the dynamic-PID cap warning.
 _PID_CAP_WARNED: set[str] = set()
@@ -318,17 +360,16 @@ def _persist_pid_entities(
     hass: HomeAssistant,
     config_entry: MeatPiConfigEntry,
     sensors: dict[str, MeatPiPidSensorEntity],
-    pid_data: dict[str, Any],
     pid_config: dict[str, Any],
 ) -> None:
     """Persist the known PID keys and their trimmed config in the entry."""
     stored_config = config_entry.data.get("config", {})
     existing_config = dict(stored_config) if isinstance(stored_config, dict) else {}
-    for pid_key in pid_data:
+    for pid_key in sensors:
         # Refresh stored config for every known PID (a changed unit or class
         # takes effect after reload), but only for keys that actually back an
         # entity so junk keys never reach storage.
-        if pid_key in sensors and pid_key in pid_config:
+        if pid_key in pid_config:
             existing_config[pid_key] = _trimmed_pid_config(pid_config[pid_key])
     new_data = dict(config_entry.data)
     new_data["pid_keys"] = list(sensors.keys())
@@ -388,9 +429,11 @@ async def async_setup_entry(  # noqa: C901
         )
 
     DYNAMIC_PID_SENSORS[config_entry.entry_id] = {}
+    PID_CONFIG_TABLES[config_entry.entry_id] = PidConfigTables()
 
     def _cleanup_dynamic_state() -> None:
         DYNAMIC_PID_SENSORS.pop(config_entry.entry_id, None)
+        PID_CONFIG_TABLES.pop(config_entry.entry_id, None)
         _PID_CAP_WARNED.discard(config_entry.entry_id)
 
     config_entry.async_on_unload(_cleanup_dynamic_state)
@@ -420,19 +463,24 @@ async def async_setup_entry(  # noqa: C901
     async def _async_process_pid_update(data: dict[str, Any]) -> None:
         if not isinstance(data, dict):
             return
-        pid_data = data.get("autopid_data", {})
-        if not isinstance(pid_data, dict) or not pid_data:
-            return
 
         # The platform may have been unloaded between dispatch and this task.
         sensors = DYNAMIC_PID_SENSORS.get(config_entry.entry_id)
-        if sensors is None:
+        tables = PID_CONFIG_TABLES.get(config_entry.entry_id)
+        if sensors is None or tables is None:
             return
 
-        pid_config = data.get("config", {})
-        if not isinstance(pid_config, dict):
-            pid_config = {}
+        # A v6 device sends its config after a registration and when a
+        # table changed, mostly in a push without a single value: it is
+        # taken whenever it comes and used when a PID's first value does.
+        config_pushed = tables.update(data.get("config"))
+        pid_data = data.get("autopid_data", {})
+        if not isinstance(pid_data, dict):
+            pid_data = {}
+        if not pid_data and not (config_pushed and sensors):
+            return
 
+        pid_config = tables.sensors()
         new_entities = _discover_new_pid_entities(
             config_entry, sensors, pid_data, pid_config,
         )
@@ -441,7 +489,7 @@ async def async_setup_entry(  # noqa: C901
         # Persist on every PID push, not only when a new PID appeared: a
         # corrected unit/class on an already-known PID must survive a
         # restart too. async_update_entry is a no-op when nothing changed.
-        _persist_pid_entities(hass, config_entry, sensors, pid_data, pid_config)
+        _persist_pid_entities(hass, config_entry, sensors, pid_config)
 
     def handle_pid_update(webhook_id: str, data: dict[str, Any]) -> None:
         # IMPORTANT: multiple WiCAN entries share the same dispatcher signal.
@@ -464,6 +512,7 @@ class MeatPiSensorEntity(MeatPiEntity, RestoreSensor):
     __slots__ = ("_attr_extra_state_attributes", "_attr_native_value", "_dropped_value_reported")
 
     entity_description: MeatPiSensorEntityDescription
+    _keeps_last_value = True
 
     def __init__(
         self,
@@ -508,9 +557,10 @@ class MeatPiSensorEntity(MeatPiEntity, RestoreSensor):
         if not isinstance(status, dict) or key not in status:
             # Partial pushes are normal: keep the last value. But the
             # state must still be written, or an availability flip (the
-            # staleness health-check failing or recovering) would never
-            # render and this entity would keep showing its old value as
-            # available while every sibling goes unavailable.
+            # staleness health-check failing or recovering, the
+            # keep-last-values option changing) would never render and
+            # this entity would keep showing its old value as available
+            # while every sibling goes unavailable.
             self.async_write_ha_state()
             return
 
@@ -549,17 +599,19 @@ class MeatPiLastSeenSensorEntity(MeatPiEntity, RestoreSensor):
     """When the device last pushed data.
 
     Deliberately stays available while the device is stale: its purpose
-    is telling the user how old the (now unavailable) readings are while
-    the car is parked or the device is asleep. The value survives
-    restarts via restore, so "last seen yesterday" is not lost with HA
-    downtime.
+    is telling the user how old the readings are (unavailable, or held
+    at their last value with the keep-last-values option) while the car
+    is parked or the device is asleep. The value survives restarts via
+    restore, so "last seen yesterday" is not lost with HA downtime; the
+    coordinator reads the same restored state at startup to know whether
+    the device has gone quiet (async_restore_last_push).
     """
 
     def __init__(self, config_entry: MeatPiConfigEntry) -> None:
         super().__init__(
             config_entry,
             MeatPiSensorEntityDescription(
-                key="last_seen",
+                key=LAST_SEEN_KEY,
                 name="Last seen",
                 device_class=SensorDeviceClass.TIMESTAMP,
                 entity_category=EntityCategory.DIAGNOSTIC,
@@ -607,6 +659,7 @@ class MeatPiPidSensorEntity(MeatPiEntity, RestoreSensor):
     )
 
     entity_description: MeatPiSensorEntityDescription
+    _keeps_last_value = True
 
     def __init__(
         self,
@@ -641,7 +694,7 @@ class MeatPiPidSensorEntity(MeatPiEntity, RestoreSensor):
         if isinstance(value, (int, float)) and not isinstance(value, bool):
             self._numeric_seen = True
             self._dropped_value_reported = False
-            return value
+            return self._rounded(value)
         if value is None or not self._numeric_state_expected:
             return value
         numeric = _coerce_numeric_value(value)
@@ -657,7 +710,18 @@ class MeatPiPidSensorEntity(MeatPiEntity, RestoreSensor):
         else:
             self._numeric_seen = True
             self._dropped_value_reported = False
+            numeric = self._rounded(numeric)
         return numeric
+
+    def _rounded(self, value: float) -> int | float:
+        """Keep three decimals of a computed value; a whole number stays one.
+
+        The device computes a PID's value from the reply's bytes
+        (``B3*100/255``), so a state read ``25.0980392156863``.
+        """
+        if isinstance(value, float) and self._pid_key not in _UNROUNDED_PID_KEYS:
+            return round(value, PID_VALUE_DECIMALS)
+        return value
 
     def _handle_coordinator_update(self) -> None:
         """Handle updated data from the coordinator."""
@@ -667,8 +731,8 @@ class MeatPiPidSensorEntity(MeatPiEntity, RestoreSensor):
             self._attr_native_value = self._usable_value(pid_data[self._pid_key])
         # Always write, even when this PID is absent from the push (the
         # vehicle may have stopped reporting it): availability flips from
-        # the staleness health-check must render on restored PID sensors
-        # too, not leave them frozen on a stale value.
+        # the staleness health-check or the keep-last-values option must
+        # render on restored PID sensors too, not leave them frozen.
         self.async_write_ha_state()
 
     @callback

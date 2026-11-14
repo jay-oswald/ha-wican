@@ -363,6 +363,7 @@ async def _setup_entry_for_registration(hass: HomeAssistant) -> MockConfigEntry:
     return entry
 
 
+@pytest.mark.real_webhook_registration
 async def test_registration_retries_then_succeeds(hass: HomeAssistant) -> None:
     """A transient failure is retried and eventually succeeds."""
     from custom_components.wican import _async_register_webhook_on_device
@@ -387,6 +388,7 @@ async def test_registration_retries_then_succeeds(hass: HomeAssistant) -> None:
     assert len(calls) >= 2  # it retried after the first failure
 
 
+@pytest.mark.real_webhook_registration
 async def test_registration_failure_raises_repair(hass: HomeAssistant) -> None:
     """When registration exhausts retries, a repair issue is raised."""
     from custom_components.wican import (
@@ -407,6 +409,7 @@ async def test_registration_failure_raises_repair(hass: HomeAssistant) -> None:
     assert reg.async_get_issue(DOMAIN, _webhook_repair_issue_id(entry)) is not None
 
 
+@pytest.mark.real_webhook_registration
 async def test_registration_http_error_status(hass: HomeAssistant) -> None:
     """A device returning HTTP 500 to registration is treated as failure."""
     from custom_components.wican import _async_register_webhook_on_device

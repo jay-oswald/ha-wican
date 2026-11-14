@@ -1,0 +1,16 @@
+save_gpx:
+  fields:
+    device_id:
+      required: true
+      selector:
+        device:
+          integration: wican
+    hours:
+      required: false
+      default: 24
+      selector:
+        number:
+          min: 1
+          max: 720
+          mode: box
+          unit_of_measurement: h

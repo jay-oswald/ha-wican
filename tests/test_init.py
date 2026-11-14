@@ -6,12 +6,17 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from homeassistant.components.http import ApiConfig
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import HomeAssistant
 from homeassistant.const import CONF_WEBHOOK_ID
+from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.network import NoURLAvailableError
 
-from custom_components.wican import _async_register_webhook_on_device
+from custom_components.wican import (
+    _async_register_webhook_on_device,
+    _device_tls_support,
+)
 from custom_components.wican.const import DOMAIN
 
 from pytest_homeassistant_custom_component.common import MockConfigEntry
@@ -241,6 +246,10 @@ async def test_webhook_registration_no_url_available(
     response.status = 200
     session.post.return_value = response
 
+    # The precondition of the stored URL: Home Assistant has no network
+    # address of its own (a start before the network is up).
+    hass.config.api = ApiConfig("127.0.0.1", "127.0.0.1", 8123, False)
+
     with (
         patch(
             "custom_components.wican.helpers.get_url",
@@ -254,7 +263,11 @@ async def test_webhook_registration_no_url_available(
         assert await _async_register_webhook_on_device(hass, entry) is True
 
     session.post.assert_awaited()
-    assert session.post.await_args.kwargs["json"]["url"] == entry.data["webhook_url"]
+    assert (
+        session.post.await_args.kwargs["json"]["url"]
+        == "http://192.168.1.10:8123/api/webhook/test_webhook_id"
+    )
+    assert entry.data["webhook_url"] == "http://192.168.1.10:8123/api/webhook/test_webhook_id"
 
 
 async def test_webhook_registration_non_pro_uses_single_local_http_url(
@@ -420,11 +433,15 @@ async def test_webhook_registration_pro_pre_449_uses_single_local_url(
     }
 
 
-async def test_webhook_registration_https_local_falls_back_to_http_stored_url(
+async def test_webhook_registration_https_local_url_on_a_plain_server(
     hass: HomeAssistant,
     mock_aiohttp_session,
 ) -> None:
-    """Test HTTPS local URLs are rejected for device registration."""
+    """An https Local network URL on a plain-http server is not registered.
+
+    The server still answers plain http on its own address: that one goes
+    to the device, and the stored URL (another address here) follows it.
+    """
     config_entry = MockConfigEntry(
         domain=DOMAIN,
         title="WiCAN Device",
@@ -432,7 +449,7 @@ async def test_webhook_registration_https_local_falls_back_to_http_stored_url(
             "mdns": "http://wican_test.local:80",
             "host": "http://wican_test.local:80",
             CONF_WEBHOOK_ID: "test_webhook_id",
-            "webhook_url": "http://192.168.1.10:8123/api/webhook/test_webhook_id",
+            "webhook_url": "http://192.168.1.99:8123/api/webhook/test_webhook_id",
         },
         unique_id="wican_test-192.168.1.103:80",
     )
@@ -451,6 +468,8 @@ async def test_webhook_registration_https_local_falls_back_to_http_stored_url(
     response.status = 200
     session.post.return_value = response
 
+    hass.config.api = ApiConfig("192.168.1.10", "192.168.1.10", 8123, False)
+
     with (
         patch(
             "custom_components.wican.helpers.get_url",
@@ -462,9 +481,163 @@ async def test_webhook_registration_https_local_falls_back_to_http_stored_url(
         ),
     ):
         assert await _async_register_webhook_on_device(hass, entry) is True
+        await hass.async_block_till_done()
 
     session.post.assert_awaited()
-    assert session.post.await_args.kwargs["json"]["url"] == entry.data["webhook_url"]
+    assert (
+        session.post.await_args.kwargs["json"]["url"]
+        == "http://192.168.1.10:8123/api/webhook/test_webhook_id"
+    )
+    assert entry.data["webhook_url"] == "http://192.168.1.10:8123/api/webhook/test_webhook_id"
+
+
+# ---- Home Assistant's own web server with SSL on (HTTPS only) ---------------
+
+HTTPS_BY_IP = "https://192.168.1.10:8123/api/webhook/test_webhook_id"
+HTTPS_BY_NAME = "https://ha.example.org:8123/api/webhook/test_webhook_id"
+STORED_HTTP = "http://192.168.1.10:8123/api/webhook/test_webhook_id"
+
+
+async def _loaded_entry(hass: HomeAssistant, hw_version: str | None) -> MockConfigEntry:
+    """Return a loaded entry that was added while the server was plain http."""
+    data = {
+        "mdns": "http://wican_test.local:80",
+        "host": "http://wican_test.local:80",
+        CONF_WEBHOOK_ID: "test_webhook_id",
+        "webhook_url": STORED_HTTP,
+    }
+    if hw_version:
+        data["hw_version"] = hw_version
+    config_entry = MockConfigEntry(domain=DOMAIN, title="WiCAN Device", data=data)
+    config_entry.add_to_hass(hass)
+    with patch(
+        "custom_components.wican._async_register_webhook_on_device",
+        return_value=True,
+    ):
+        assert await hass.config_entries.async_setup(config_entry.entry_id)
+        await hass.async_block_till_done()
+    return config_entry
+
+
+def _server_with_ssl(hass: HomeAssistant, *, ssl: bool = True) -> None:
+    """What `ssl_certificate` under `http:` makes of the server description."""
+    hass.config.api = ApiConfig("192.168.1.10", "192.168.1.10", 8123, ssl)
+    hass.config.internal_url = None
+    hass.config.external_url = "https://ha.example.org:8123"
+
+
+def _device_session() -> AsyncMock:
+    session = AsyncMock()
+    response = AsyncMock()
+    response.status = 200
+    session.post.return_value = response
+    return session
+
+
+@pytest.mark.parametrize("hw_version", ["WiCAN-PRO", None])
+async def test_webhook_registration_server_with_ssl_registers_https(
+    hass: HomeAssistant,
+    mock_aiohttp_session,
+    hw_version: str | None,
+) -> None:
+    """SSL turned on after the entry was added: https URLs, the http one gone.
+
+    A PRO, and a device that has not reported its hardware yet, both get
+    the server's own https address first and the Internet URL behind it.
+    The URL stored while SSL was off is neither registered nor kept.
+    """
+    entry = await _loaded_entry(hass, hw_version)
+    _server_with_ssl(hass)
+    session = _device_session()
+
+    with patch(
+        "custom_components.wican.async_get_clientsession",
+        return_value=session,
+    ):
+        assert await _async_register_webhook_on_device(hass, entry) is True
+        await hass.async_block_till_done()
+
+    payload = session.post.await_args.kwargs["json"]
+    assert payload["url"] == HTTPS_BY_IP
+    assert payload["urls"] == [HTTPS_BY_IP, HTTPS_BY_NAME]
+    assert entry.data["webhook_url"] == HTTPS_BY_IP
+    assert ir.async_get(hass).async_get_issue(
+        DOMAIN, f"https_only_server_{entry.entry_id}",
+    ) is None
+
+
+@pytest.mark.parametrize("hw_version", ["WiCAN-OBD", "WiCAN-USB"])
+async def test_webhook_registration_server_with_ssl_device_without_tls(
+    hass: HomeAssistant,
+    mock_aiohttp_session,
+    hw_version: str,
+) -> None:
+    """A WiCAN OBD or USB cannot push to an HTTPS-only Home Assistant.
+
+    Nothing is registered and a repair issue says why; it clears at the
+    first registration after the server is back on plain http.
+    """
+    entry = await _loaded_entry(hass, hw_version)
+    issue_id = f"https_only_server_{entry.entry_id}"
+    _server_with_ssl(hass)
+    session = _device_session()
+
+    with patch(
+        "custom_components.wican.async_get_clientsession",
+        return_value=session,
+    ):
+        assert await _async_register_webhook_on_device(hass, entry) is False
+
+        session.post.assert_not_awaited()
+        issue = ir.async_get(hass).async_get_issue(DOMAIN, issue_id)
+        assert issue is not None
+        assert issue.translation_key == "https_only_server"
+        assert issue.translation_placeholders == {"device": "WiCAN Device"}
+        assert entry.data["webhook_url"] == STORED_HTTP
+
+        _server_with_ssl(hass, ssl=False)
+        assert await _async_register_webhook_on_device(hass, entry) is True
+        await hass.async_block_till_done()
+
+    assert session.post.await_args.kwargs["json"]["url"] == STORED_HTTP
+    assert ir.async_get(hass).async_get_issue(DOMAIN, issue_id) is None
+
+
+async def test_unload_clears_the_https_only_repair_issue(
+    hass: HomeAssistant,
+    mock_aiohttp_session,
+) -> None:
+    """An unloaded entry leaves no HTTPS-only repair issue behind."""
+    entry = await _loaded_entry(hass, "WiCAN-OBD")
+    issue_id = f"https_only_server_{entry.entry_id}"
+    _server_with_ssl(hass)
+
+    assert await _async_register_webhook_on_device(hass, entry) is False
+    assert ir.async_get(hass).async_get_issue(DOMAIN, issue_id) is not None
+
+    assert await hass.config_entries.async_unload(entry.entry_id)
+    await hass.async_block_till_done()
+
+    assert ir.async_get(hass).async_get_issue(DOMAIN, issue_id) is None
+
+
+def test_device_tls_support() -> None:
+    """Which devices can push over HTTPS, and which are not known yet."""
+
+    def entry(**data: str) -> MockConfigEntry:
+        return MockConfigEntry(domain=DOMAIN, data=data)
+
+    assert _device_tls_support(entry(hw_version="WiCAN-PRO")) is True
+    # positively a WiCAN without a TLS stack
+    assert _device_tls_support(entry(hw_version="WiCAN-OBD")) is False
+    assert _device_tls_support(entry(hw_version="WiCAN-USB")) is False
+    # not reported yet: the WiCAN type of a manual entry is only a default
+    assert _device_tls_support(entry()) is None
+    assert _device_tls_support(entry(device_type="wican")) is None
+    # another product, or a hardware string the integration does not know
+    assert _device_tls_support(entry(hw_version="ESPNetlink R1")) is None
+    assert _device_tls_support(entry(hw_version="MeatPi Hub R1")) is None
+    assert _device_tls_support(entry(hw_version="v3.1")) is None
 
 
 
