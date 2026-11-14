@@ -302,6 +302,12 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self.discovered_mac = mac_address
         self.discovered_device_id = device_id
         self.discovered_device_type = device_type
+        # The card on the integrations page: without a name every discovered
+        # device stood there under the integration's name alone, and two
+        # devices could only be told apart by opening each.
+        self.context["title_placeholders"] = {
+            "name": self.discovered_name or "MeatPi device",
+        }
 
         return await self.async_step_zeroconf_confirm()
 
