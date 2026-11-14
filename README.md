@@ -345,7 +345,13 @@ automation:
   you prefer friendlier names.
 - **Units are defined on the device.** To change a PID's unit of measurement,
   update it on the WiCAN device (Automate tab) and reload the integration; it
-  cannot be changed from Home Assistant alone.
+  cannot be changed from Home Assistant alone. A unit the device spells its own
+  way is shown in Home Assistant's spelling (`degC` as `°C`, `volts` as `V`,
+  `grams/sec` as `g/s`). A device class that Home Assistant does not accept
+  with the PID's unit is left out and the unit is kept.
+- **PID values keep three decimals.** The device computes a value from the
+  bytes of the car's answer; `25.0980392156863` is shown as `25.098`. The
+  position of a GPS fix keeps every digit.
 - **One device per config entry.** Each WiCAN adapter is added separately.
 - **Webhook reachability is required.** The device must be able to reach Home
   Assistant's webhook URL; if it cannot, entities will not update and a repair

@@ -249,4 +249,8 @@ LAST_SEEN_KEY = "last_seen"
 MAX_DYNAMIC_PID_SENSORS = 1000
 MAX_PID_KEY_LENGTH = 128
 MAX_PID_CONFIG_FIELD_LENGTH = 64
+
+# A PID's value is computed on the device (B3*100/255): three decimals keep
+# every reading a car gives and spare the state 13 digits of arithmetic.
+PID_VALUE_DECIMALS = 3
 MAX_DEVICE_INFO_FIELD_LENGTH = 255
