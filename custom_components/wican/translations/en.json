@@ -170,7 +170,7 @@
   "services": {
     "save_gpx": {
       "name": "Save GPS track (GPX)",
-      "description": "Writes the GPS fix the device recorded on its SD card (Store and forward) as a GPX track under www/wican, available as /local/wican/<file>.gpx. Hourly statistics cannot hold a position; this is the time series.",
+      "description": "Writes the GPS fix the device recorded on its SD card (Store and forward) as a GPX track under www/wican and returns its address: /local/wican/ followed by the file name. Hourly statistics cannot hold a position; this is the time series.",
       "fields": {
         "device_id": {
           "name": "Device",
