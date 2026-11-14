@@ -1240,6 +1240,23 @@ async def async_remove_entry(
     await async_remove_history_store(hass, entry)
 
 
+async def async_remove_config_entry_device(
+    hass: HomeAssistant,  # noqa: ARG001 - required by Home Assistant
+    entry: MeatPiConfigEntry,
+    device_entry: dr.DeviceEntry,
+) -> bool:
+    """Allow removing a device that is no longer the configured adapter.
+
+    The device is keyed on the adapter's device_id, or on the entry id until
+    the adapter reports one. A device under any other identifier (the entry-id
+    placeholder once the device_id is known, or an adapter that has been
+    replaced) has no entities left and could not be deleted. The current
+    adapter's device stays protected: it would come back on the next post.
+    """
+    current = entry.data.get("device_id") or entry.entry_id
+    return (DOMAIN, current) not in device_entry.identifiers
+
+
 def _normalize_connection_urls(hass: HomeAssistant, entry: MeatPiConfigEntry) -> None:
     """Normalize host/mdns URLs by ensuring they have http:// scheme.
 
