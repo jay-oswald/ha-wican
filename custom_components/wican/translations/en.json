@@ -51,12 +51,14 @@
         "data": {
           "post_interval": "Post interval (seconds)",
           "history_sync": "Catch up history from the device log (store and forward)",
-          "history_prefer_live": "Keep the live statistics of hours the device also recorded"
+          "history_prefer_live": "Keep the live statistics of hours the device also recorded",
+          "keep_last_values": "Keep the last values while the device is offline"
         },
         "data_description": {
           "post_interval": "How often the device pushes data to Home Assistant.",
           "history_sync": "When the device reconnects after being away, the hours it recorded on its SD card are imported into each sensor's long-term statistics (hourly resolution). Needs Store and forward on the device (Automate > Home Assistant).",
-          "history_prefer_live": "Off: the recorded hours replace what the live pushes left of the same hour, so the drive's last hour is complete. On: an hour Home Assistant already has is never touched."
+          "history_prefer_live": "Off: the recorded hours replace what the live pushes left of the same hour, so the drive's last hour is complete. On: an hour Home Assistant already has is never touched.",
+          "keep_last_values": "Off: the sensors and the location show as unavailable once the device stops sending data (asleep, out of Wi-Fi range). On: they keep their last received value, and the Connected and Last seen sensors tell how current it is. A car that drives out of range keeps showing its last speed and RPM until it is back. ECU Online, Bluetooth Enabled and the device buttons follow the device either way."
         }
       }
     }
@@ -82,6 +84,9 @@
       },
       "ecu_status": {
         "name": "ECU Online"
+      },
+      "connected": {
+        "name": "Connected"
       }
     },
     "button": {

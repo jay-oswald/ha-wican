@@ -111,6 +111,11 @@ async def async_get_config_entry_diagnostics(
         },
         "coordinator": {
             "last_update_success": coordinator.last_update_success,
+            "device_online": coordinator.device_online,
+            "last_push": coordinator.last_push.isoformat()
+            if coordinator.last_push
+            else None,
+            "keep_last_values": coordinator.keep_last_values,
             "update_interval": str(coordinator.update_interval)
             if coordinator.update_interval
             else None,

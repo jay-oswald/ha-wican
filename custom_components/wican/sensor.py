@@ -23,6 +23,7 @@ from homeassistant.util import dt as dt_util
 from .attributes import SENSOR_DESCRIPTIONS, MeatPiSensorEntityDescription, get_sensor_attributes
 from .const import (
     DOMAIN,
+    LAST_SEEN_KEY,
     MAX_DYNAMIC_PID_SENSORS,
     MAX_PID_CONFIG_FIELD_LENGTH,
     MAX_PID_KEY_LENGTH,
@@ -464,6 +465,7 @@ class MeatPiSensorEntity(MeatPiEntity, RestoreSensor):
     __slots__ = ("_attr_extra_state_attributes", "_attr_native_value", "_dropped_value_reported")
 
     entity_description: MeatPiSensorEntityDescription
+    _keeps_last_value = True
 
     def __init__(
         self,
@@ -508,9 +510,10 @@ class MeatPiSensorEntity(MeatPiEntity, RestoreSensor):
         if not isinstance(status, dict) or key not in status:
             # Partial pushes are normal: keep the last value. But the
             # state must still be written, or an availability flip (the
-            # staleness health-check failing or recovering) would never
-            # render and this entity would keep showing its old value as
-            # available while every sibling goes unavailable.
+            # staleness health-check failing or recovering, the
+            # keep-last-values option changing) would never render and
+            # this entity would keep showing its old value as available
+            # while every sibling goes unavailable.
             self.async_write_ha_state()
             return
 
@@ -549,17 +552,19 @@ class MeatPiLastSeenSensorEntity(MeatPiEntity, RestoreSensor):
     """When the device last pushed data.
 
     Deliberately stays available while the device is stale: its purpose
-    is telling the user how old the (now unavailable) readings are while
-    the car is parked or the device is asleep. The value survives
-    restarts via restore, so "last seen yesterday" is not lost with HA
-    downtime.
+    is telling the user how old the readings are (unavailable, or held
+    at their last value with the keep-last-values option) while the car
+    is parked or the device is asleep. The value survives restarts via
+    restore, so "last seen yesterday" is not lost with HA downtime; the
+    coordinator reads the same restored state at startup to know whether
+    the device has gone quiet (async_restore_last_push).
     """
 
     def __init__(self, config_entry: MeatPiConfigEntry) -> None:
         super().__init__(
             config_entry,
             MeatPiSensorEntityDescription(
-                key="last_seen",
+                key=LAST_SEEN_KEY,
                 name="Last seen",
                 device_class=SensorDeviceClass.TIMESTAMP,
                 entity_category=EntityCategory.DIAGNOSTIC,
@@ -607,6 +612,7 @@ class MeatPiPidSensorEntity(MeatPiEntity, RestoreSensor):
     )
 
     entity_description: MeatPiSensorEntityDescription
+    _keeps_last_value = True
 
     def __init__(
         self,
@@ -667,8 +673,8 @@ class MeatPiPidSensorEntity(MeatPiEntity, RestoreSensor):
             self._attr_native_value = self._usable_value(pid_data[self._pid_key])
         # Always write, even when this PID is absent from the push (the
         # vehicle may have stopped reporting it): availability flips from
-        # the staleness health-check must render on restored PID sensors
-        # too, not leave them frozen on a stale value.
+        # the staleness health-check or the keep-last-values option must
+        # render on restored PID sensors too, not leave them frozen.
         self.async_write_ha_state()
 
     @callback

@@ -210,6 +210,18 @@ WICAN_DATA_UPDATE_INTERVAL = 300  # seconds (5 minutes)
 DEVICE_STALE_FACTOR = 5
 MIN_DEVICE_STALE_SECONDS = 120
 
+# What the entities that carry a device reading (status and PID sensors, the
+# location) show while the device is away. False: they go unavailable with
+# the device. True: they keep their last received value, and the Connected
+# and Last seen sensors say how current it is. Entities that act on the
+# device or describe its live links follow the device either way.
+CONF_KEEP_LAST_VALUES = "keep_last_values"
+DEFAULT_KEEP_LAST_VALUES = False
+
+# Key of the Last seen sensor. The coordinator reads that sensor's restored
+# state at startup, so both sides must agree on its unique id.
+LAST_SEEN_KEY = "last_seen"
+
 # Bounds on device-reported data. A healthy device never exceeds these; a
 # misbehaving one (corrupted memory, hostile caller) must not be able to grow
 # the entity registry or the config entry without limit.

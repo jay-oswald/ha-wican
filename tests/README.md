@@ -12,6 +12,9 @@ Key building blocks:
   (telemetry, control buttons, OTA lifecycle, failure injection).
 - `test_history*.py` — the SD-card history backfill: unit, end-to-end,
   hardening, and real in-memory-recorder round-trips.
+- `test_keep_last_values.py` — what entities show while the device is away:
+  the keep-last-values option, the Connected sensor, and a device that went
+  quiet across a Home Assistant restart.
 - `test_device_simulation.py` / `test_device_chaos.py` /
   `test_hardening.py` — the hardened-telemetry and failure-injection
   suites.

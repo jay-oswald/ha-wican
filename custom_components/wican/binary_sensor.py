@@ -6,8 +6,10 @@ import logging
 from typing import TYPE_CHECKING, Any
 
 from homeassistant.components.binary_sensor import (
+    BinarySensorDeviceClass,
     BinarySensorEntity,
 )
+from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.restore_state import RestoreEntity
 
@@ -38,9 +40,12 @@ async def async_setup_entry(
     """Set up the binary sensor platform."""
     profile = config_entry.runtime_data.device_profile
     async_add_entities(
-        MeatPiBinarySensorEntity(config_entry, description)
-        for description in BINARY_SENSOR_DESCRIPTIONS
-        if profile.supports_obd_pids or not description.requires_obd
+        [
+            MeatPiBinarySensorEntity(config_entry, description)
+            for description in BINARY_SENSOR_DESCRIPTIONS
+            if profile.supports_obd_pids or not description.requires_obd
+        ]
+        + [MeatPiConnectedBinarySensorEntity(config_entry)],
     )
 
 class MeatPiBinarySensorEntity(MeatPiEntity, BinarySensorEntity, RestoreEntity):
@@ -94,3 +99,40 @@ class MeatPiBinarySensorEntity(MeatPiEntity, BinarySensorEntity, RestoreEntity):
         if last_state is not None and self._attr_is_on is None:
             self._attr_is_on = last_state.state == "on"
         await super().async_added_to_hass()
+
+
+class MeatPiConnectedBinarySensorEntity(MeatPiEntity, BinarySensorEntity):
+    """Whether the device is currently pushing data.
+
+    Always available, like Last seen: it is the one entity that says the
+    device is away, which matters most with the keep-last-values option
+    on, when the readings stay on their last value instead of going
+    unavailable. Unknown until the device has been heard from at all.
+    """
+
+    __slots__ = ()
+
+    def __init__(self, config_entry: MeatPiConfigEntry) -> None:
+        super().__init__(
+            config_entry,
+            MeatPiBinarySensorEntityDescription(
+                key="connected",
+                translation_key="connected",
+                device_class=BinarySensorDeviceClass.CONNECTIVITY,
+                entity_category=EntityCategory.DIAGNOSTIC,
+            ),
+        )
+
+    @property
+    def available(self) -> bool:
+        """Stay available while the device is away: that is what it reports."""
+        return True
+
+    @property
+    def is_on(self) -> bool | None:
+        """Return whether pushes are arriving (None before the first one)."""
+        return self.coordinator.device_online
+
+    @callback
+    def _async_handle_event(self, webhook_id: str, data: dict[str, str]) -> None:
+        """Handle webhook event (this sensor follows the coordinator)."""

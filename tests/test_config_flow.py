@@ -538,6 +538,46 @@ async def test_options_flow_valid_data(
     assert result2["data"]["post_interval"] == 2000
 
 
+async def test_options_flow_keep_last_values(
+    hass: HomeAssistant,
+) -> None:
+    """Keep-last-values is off unless chosen, and shown as chosen afterwards."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            CONF_WEBHOOK_ID: "test_webhook",
+            "mdns": "http://wican_test.local:80",
+        },
+        options={"post_interval": 15},
+    )
+    entry.add_to_hass(hass)
+
+    # Left alone, the form submits the default: off.
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    assert result["type"] == FlowResultType.FORM
+    assert "keep_last_values" in str(result["data_schema"])
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], user_input={"post_interval": 15},
+    )
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    assert result["data"]["keep_last_values"] is False
+
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"],
+        user_input={"post_interval": 15, "keep_last_values": True},
+    )
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    assert entry.options["keep_last_values"] is True
+
+    # Reopened, the form defaults to what is stored.
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], user_input={"post_interval": 15},
+    )
+    assert result["data"]["keep_last_values"] is True
+
+
 async def test_format_http_url_empty_string(
     hass: HomeAssistant,
 ) -> None:

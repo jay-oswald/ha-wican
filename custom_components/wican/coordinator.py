@@ -7,17 +7,22 @@ import logging
 from math import isfinite
 from typing import TYPE_CHECKING, Any
 
-from homeassistant.const import MAX_LENGTH_STATE_STATE
+from homeassistant.const import MAX_LENGTH_STATE_STATE, Platform
 from homeassistant.core import callback
 from homeassistant.exceptions import ConfigEntryError
+from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers.restore_state import async_get as async_get_restore_state
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util import dt as dt_util
 
 from .const import (
+    CONF_KEEP_LAST_VALUES,
     CONF_POST_INTERVAL,
+    DEFAULT_KEEP_LAST_VALUES,
     DEFAULT_POST_INTERVAL,
     DEVICE_STALE_FACTOR,
     DOMAIN,
+    LAST_SEEN_KEY,
     MAX_COORDINATOR_KEYS,
     MIN_DEVICE_STALE_SECONDS,
     WICAN_DATA_UPDATE_INTERVAL,
@@ -52,6 +57,7 @@ class MeatPiDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._data: dict[str, Any] = {}
         self._last_push: datetime | None = None
         self._key_cap_warned = False
+        self._keep_last_values = self._keep_last_values_option()
 
         super().__init__(
             hass,
@@ -66,15 +72,86 @@ class MeatPiDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """When the device last pushed data (None before the first push)."""
         return self._last_push
 
+    @property
+    def device_online(self) -> bool | None:
+        """Whether the device is pushing data.
+
+        None until the device has been heard from at all (a fresh install
+        waiting for its first push), then True while pushes keep arriving
+        and False once the staleness health-check has failed.
+        """
+        if self._last_push is None:
+            return None
+        return self.last_update_success
+
+    @property
+    def keep_last_values(self) -> bool:
+        """Whether reading entities keep their last value while the device is away."""
+        return self._keep_last_values
+
+    def _keep_last_values_option(self) -> bool:
+        """Read the keep-last-values option from the config entry."""
+        return bool(
+            self.config_entry.options.get(
+                CONF_KEEP_LAST_VALUES, DEFAULT_KEEP_LAST_VALUES,
+            ),
+        )
+
+    @callback
+    def async_options_updated(self) -> None:
+        """Apply a changed keep-last-values option right away.
+
+        Entities only render on coordinator notifications, so a device that
+        is away would keep showing the old choice until its next push.
+        Notify them when (and only when) the option actually changed.
+        """
+        keep_last_values = self._keep_last_values_option()
+        if keep_last_values == self._keep_last_values:
+            return
+        self._keep_last_values = keep_last_values
+        self.async_update_listeners()
+
+    @callback
+    def async_restore_last_push(self) -> None:
+        """Pick up the last push time from before a restart or reload.
+
+        Home Assistant keeps the Last seen sensor's state across restarts.
+        Reading it before the first health-check, and before any entity is
+        added, lets a device that went quiet before or during the downtime
+        start out stale. Without it the device would look connected, and
+        its restored readings current, until its next push.
+        """
+        if self._last_push is not None:
+            return
+        entity_id = er.async_get(self.hass).async_get_entity_id(
+            Platform.SENSOR,
+            DOMAIN,
+            f"{self.config_entry.entry_id}_{LAST_SEEN_KEY}",
+        )
+        if entity_id is None:
+            return
+        stored = async_get_restore_state(self.hass).last_states.get(entity_id)
+        if stored is None:
+            return
+        try:
+            restored = dt_util.parse_datetime(stored.state.state)
+        except ValueError:
+            # Shaped like a timestamp but not a real date: nothing to adopt.
+            return
+        if restored is None:
+            return
+        self._last_push = dt_util.as_utc(restored)
+
     async def _async_update_data(self) -> dict[str, Any]:
         """Health-check the push-based device.
 
         This is a push-based integration, so we don't actively poll. This
         periodic callback exists to detect when the device has stopped pushing:
         if no webhook data has arrived within the staleness window, raise
-        UpdateFailed so entities become unavailable. DataUpdateCoordinator logs
-        the transition to unavailable and the subsequent recovery once each
-        (log-when-unavailable).
+        UpdateFailed so entities become unavailable (reading entities hold
+        their last value instead when the keep-last-values option is on).
+        DataUpdateCoordinator logs the transition to unavailable and the
+        subsequent recovery once each (log-when-unavailable).
         """
         if self._last_push is None:
             # No push received yet; stay available while waiting for the device.
@@ -128,6 +205,9 @@ class MeatPiDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         _LOGGER.debug(
             "First refresh for WiCAN coordinator (push-based, no polling required)",
         )
+        # A device heard from before the restart may have gone quiet since:
+        # know that before the health-check below runs.
+        self.async_restore_last_push()
         # Initialize with empty data - webhook pushes will populate it
         await self.async_refresh()
 

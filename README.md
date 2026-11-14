@@ -54,6 +54,8 @@ WiCAN adapter with the following entities:
 | `sensor` | Dynamic PID sensors | One sensor per OBD-II PID configured on the device (e.g. speed, coolant temperature, state of charge). Created automatically as data arrives. High-volume per-cell battery voltages are created **disabled by default**. |
 | `binary_sensor` | ECU Online | Whether the vehicle ECU is currently responding. |
 | `binary_sensor` | Bluetooth Enabled | Diagnostic BLE status. |
+| `binary_sensor` | Connected | Whether the device is currently sending data. Always available: it turns off when the device goes quiet (asleep, out of Wi-Fi range) and back on with the next push. |
+| `sensor` | Last seen | When the device last sent data. Always available, so you can tell how old the other readings are. |
 | `device_tracker` | Location | GPS location of the device/vehicle, where GPS data is available. |
 | `update` | Firmware | Shows available WiCAN firmware from GitHub and installs it over the air. |
 | `button` | Restart, Sync time | Control buttons backed by the device HTTP API. Created automatically on firmware V6+ devices (Sync time requires the RTC component); not shown on older firmware. |
@@ -77,6 +79,27 @@ If the device stops pushing (for example the car is parked and the adapter is in
 sleep mode), the entities are marked **unavailable** after several missed
 intervals, and become available again on the next push. A repair issue is raised
 if Home Assistant cannot register its webhook on the device at all.
+
+If you would rather keep seeing the last readings while the device is away, turn
+on **Keep the last values while the device is offline** for that device (see
+[Configuration parameters](#configuration-parameters-options)):
+
+| While the device is away | Option off (default) | Option on |
+|---|---|---|
+| Battery Voltage, the other status sensors, PID sensors | Unavailable | Last received value |
+| Location | Unavailable | Last known location |
+| ECU Online, Bluetooth Enabled | Unavailable | Unavailable |
+| Restart, Sync time | Unavailable | Unavailable |
+| Connected | Off | Off |
+| Last seen | Time of the last push | Time of the last push |
+
+The same applies after a restart of Home Assistant: a device that went quiet
+before or during the restart starts out as away, not as freshly connected.
+
+With the option on, a held value is the last one received, not a current one. A
+car that drives out of Wi-Fi range keeps showing the speed and RPM of that
+moment until it is back, so use **Connected** or **Last seen** in automations
+and dashboards that need to know whether a reading is live.
 
 Two behaviors help devices on the road:
 
@@ -133,6 +156,7 @@ After setup, use the integration's **Configure** button:
 |---|---|---|---|
 | **Post Interval** | 15 s | 1–3600 s | How often the device pushes data to Home Assistant. Lower values mean more frequent updates and more network traffic. |
 | **Backfill history from the device log** | on | on/off | When the device reconnects after being away, import the AutoPID data it logged to its SD card into each sensor's long-term statistics at the recorded times (see [History backfill](#history-backfill-offline-drives)). |
+| **Keep the last values while the device is offline** | off | on/off | Off: the sensors and the location show as unavailable once the device stops sending data. On: they keep their last received value, and the Connected and Last seen sensors tell how current it is (see [How data updates work](#how-data-updates-work)). Set per device; takes effect immediately and nothing is sent to the device, so it can be changed while the car is asleep. |
 
 You can also change the device address later with the **Reconfigure** option
 without deleting and re-adding the integration.
@@ -195,6 +219,11 @@ What to expect:
   the live pushes are samples of it (the option **Keep the live statistics
   of hours the device also recorded** restores the old rule). Re-runs are
   idempotent.
+- With **Keep the last values while the device is offline** on, leave **Keep
+  the live statistics of hours the device also recorded** off (the default).
+  A held value keeps producing statistics while the device is away, so every
+  hour of a drive already has live statistics by the time the device is back,
+  and the catch-up would skip them all.
 - Requirements: a firmware with the export route (V6; the 2026-11 build
   adds the sleep hold and the export counters), the params stream in
   `jsonl` or `csv` (Store and forward sets it; a `sqlite` or `binary`
@@ -312,9 +341,15 @@ The WiCAN device might not be reachable, or its protocol is not set to AutoPID.
 2. Confirm the device protocol is set to **AutoPID** in its settings.
 
 ### The device is added, but all entities show "Unavailable"
-Home Assistant was restarted or the integration reloaded while the device was
-unavailable (car away, sleep mode). Make the device available again (e.g. turn on
-the ignition) and reload the integration.
+The device is not sending data (car away, sleep mode); **Last seen** shows when
+it last did. The entities come back by themselves with the next push, for
+example when the ignition is turned on. If they stay unavailable while the
+device is awake, reload the integration so that it registers its webhook on the
+device again.
+
+To see the last readings instead of "Unavailable" while the device is away, turn
+on **Keep the last values while the device is offline** in the integration's
+**Configure** dialog.
 
 If Home Assistant's own web server has SSL on, also check the device's *Home
 Assistant* card (*Automate*). A `failed` status there usually means that the

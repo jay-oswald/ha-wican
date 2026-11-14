@@ -1594,17 +1594,28 @@ async def _async_register_webhook_on_device(  # noqa: C901, PLR0912, PLR0915
 
 
 async def _async_entry_updated(hass: HomeAssistant, entry: MeatPiConfigEntry) -> None:
-    """Handle config entry updates (options) by re-registering the webhook."""
+    """Apply changed options without reloading the entry.
+
+    A new post interval is sent to the device by re-registering the
+    webhook. The keep-last-values option only changes what entities show,
+    so it is applied here in Home Assistant and nothing is sent: that
+    option is typically changed while the device is asleep, when a
+    registration attempt can only fail and raise its repair issue.
+    """
     # The listener can fire while the entry is tearing down (runtime_data
     # is deleted on unload); the reload that follows re-reads the options.
     runtime = getattr(entry, "runtime_data", None)
     if runtime is None:
         return
 
-    # Update post_interval in runtime_data
-    runtime.post_interval = entry.options.get(
-        CONF_POST_INTERVAL, DEFAULT_POST_INTERVAL,
-    )
+    runtime.coordinator.async_options_updated()
+
+    post_interval = entry.options.get(CONF_POST_INTERVAL, DEFAULT_POST_INTERVAL)
+    if post_interval == runtime.post_interval:
+        # The listener also fires for entry data updates (device-reported
+        # info, PID definitions): nothing the device needs to hear about.
+        return
+    runtime.post_interval = post_interval
 
     # Re-register webhook with new interval (coalesced with any in-flight run)
     await _async_request_webhook_registration(hass, entry)

@@ -88,6 +88,12 @@ async def test_diagnostics_includes_coordinator_status(
 
     client = await hass_client()
 
+    # Before the first push the device has never been heard from.
+    diagnostics = await async_get_config_entry_diagnostics(hass, entry)
+    assert diagnostics["coordinator"]["device_online"] is None
+    assert diagnostics["coordinator"]["last_push"] is None
+    assert diagnostics["coordinator"]["keep_last_values"] is False
+
     # Post webhook data to populate coordinator
     await client.post(f"/api/webhook/{webhook_id}", json=mock_webhook_data)
     await hass.async_block_till_done()
@@ -97,6 +103,11 @@ async def test_diagnostics_includes_coordinator_status(
     # Check coordinator info
     assert diagnostics["coordinator"]["last_update_success"] is True
     assert diagnostics["coordinator"]["data_keys"] == ["status", "pids"]
+    assert diagnostics["coordinator"]["device_online"] is True
+    assert (
+        diagnostics["coordinator"]["last_push"]
+        == entry.runtime_data.coordinator.last_push.isoformat()
+    )
 
 
 async def test_diagnostics_includes_entity_states(
