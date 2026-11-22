@@ -18,6 +18,7 @@ Design record: notes/MEATPI_INTEGRATION_PLAN.md (phase 9).
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 from http import HTTPStatus
 import json
 import logging
@@ -37,6 +38,7 @@ from .const import (
     CATALOG_MAX_KEYWORD_LENGTH,
     CATALOG_MAX_KEYWORDS,
     CATALOG_MAX_MODEL_LENGTH,
+    CATALOG_MAX_RECORDER_SCHEMAS,
     CATALOG_MAX_SENSORS,
     CATALOG_REFRESH_INTERVAL,
     CATALOG_SCHEMA_VERSION,
@@ -194,6 +196,49 @@ def parse_catalog(raw: Any) -> dict[str, MeatPiDeviceProfile] | None:
     return profiles
 
 
+@dataclass(frozen=True, slots=True)
+class IntegrationPolicy:
+    """What the catalog says about the integration itself (not a device).
+
+    ``history_states``: the History fill writes into the recorder's own
+    table and runs only on the recorder database versions it was tested
+    with. A Home Assistant release with a new version needs a test, not an
+    integration release: the catalog adds the version here once it passed,
+    and can block one that turned out not to work.
+    """
+
+    history_states_schemas: frozenset[int] = frozenset()
+    history_states_blocked: frozenset[int] = frozenset()
+
+
+def _parse_schema_list(raw: Any) -> frozenset[int]:
+    if not isinstance(raw, list):
+        return frozenset()
+    return frozenset(
+        item
+        for item in raw[:CATALOG_MAX_RECORDER_SCHEMAS]
+        if isinstance(item, int) and not isinstance(item, bool) and 0 < item < 100000
+    )
+
+
+def parse_integration_policy(raw: Any) -> IntegrationPolicy:
+    """Read the ``integration`` section of a catalog document.
+
+    Data like the rest of the catalog: anything that is not a list of
+    version numbers counts as an empty list, never as an error.
+    """
+    section = raw.get("integration") if isinstance(raw, dict) else None
+    states = section.get("history_states") if isinstance(section, dict) else None
+    if not isinstance(states, dict):
+        return IntegrationPolicy()
+    return IntegrationPolicy(
+        history_states_schemas=_parse_schema_list(states.get("recorder_schemas")),
+        history_states_blocked=_parse_schema_list(
+            states.get("blocked_recorder_schemas"),
+        ),
+    )
+
+
 def _load_bundled_catalog() -> Any:
     """Read the bundled catalog file (executor job — blocking I/O)."""
     path = Path(__file__).parent / "data" / "device_catalog.json"
@@ -236,6 +281,7 @@ class _CatalogManager:
         self._lock = asyncio.Lock()
         self._loaded = False
         self._last_attempt = 0.0
+        self.policy = IntegrationPolicy()
 
     async def async_ensure_loaded(self) -> None:
         """Apply the best available catalog; kick off a refresh if due."""
@@ -261,6 +307,7 @@ class _CatalogManager:
             _LOGGER.warning("No usable device catalog; built-in profiles only")
             return
         apply_catalog(profiles)
+        self.policy = parse_integration_policy(raw)
         _LOGGER.debug(
             "Applied %s device catalog (%d device type(s))",
             source,
@@ -284,6 +331,7 @@ class _CatalogManager:
             _LOGGER.warning("Fetched device catalog is invalid; keeping current")
             return False
         apply_catalog(profiles)
+        self.policy = parse_integration_policy(raw)
         try:
             await self._store.async_save(
                 {"catalog": raw, "fetched_at": time.time()},
@@ -303,6 +351,13 @@ def _get_manager(hass: HomeAssistant) -> _CatalogManager:
         manager = _CatalogManager(hass)
         hass.data[_HASS_DATA_KEY] = manager
     return cast("_CatalogManager", manager)
+
+
+def integration_policy(hass: HomeAssistant) -> IntegrationPolicy:
+    """The integration policy of the catalog in use (empty before it loads)."""
+    manager = hass.data.get(_HASS_DATA_KEY)
+    policy = getattr(manager, "policy", None)
+    return policy if isinstance(policy, IntegrationPolicy) else IntegrationPolicy()
 
 
 async def async_setup_catalog(hass: HomeAssistant) -> None:

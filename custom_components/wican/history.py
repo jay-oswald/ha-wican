@@ -10,10 +10,23 @@ history at the times the data was actually recorded.
 
 Design and constraints: notes/HISTORICAL_DATA_SYNC.md. Key invariants:
 
-- Only the official ``async_import_statistics`` API is used (hourly
-  resolution; raw states are never touched).
-- The current (incomplete) hour is never imported: its rows are deferred
-  and a follow-up run picks them up after the hour has ended.
+- Statistics go in through the official ``async_import_statistics`` API
+  only (hourly resolution). The states of the time the device was away
+  (the History page) are history_states.py's job, called from here.
+- A logged value is converted from the device's unit into the unit Home
+  Assistant keeps that sensor's statistics in (history_units.py); a value
+  Home Assistant cannot convert is not imported at all.
+- The hour still running is never imported, and neither is an hour that
+  ended less than ``HISTORY_HOUR_SETTLE`` seconds ago: Home Assistant
+  writes its own row of an hour ten seconds past its end and that write
+  fails, for every sensor of the installation, when a row is there
+  already. The rows of such an hour are deferred, a follow-up run picks
+  them up, and their hourly figures are kept meanwhile: when the device
+  does not answer the follow-up (asleep a few minutes after it got home)
+  the hour is imported from that copy, and imported again from the
+  device's own rows at its next wake.
+- Rows named ``device.<key>`` (the unit's battery voltage) fill the
+  status sensor of that key.
 - Hours the device recorded replace the live statistics of the same hour
   by default (the log is the complete record, the live pushes are samples
   of it: the drive's last hour would otherwise keep only the minutes after
@@ -58,16 +71,28 @@ from homeassistant.helpers.recorder import get_instance
 from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
+from .attributes import SENSOR_DESCRIPTIONS
+from .catalog import integration_policy
 from .const import (
     CLOCK_JOURNAL_BOOT_SLACK_MS,
     CONF_HISTORY_PREFER_LIVE,
+    CONF_HISTORY_STATES,
+    CONF_HISTORY_STATES_STEP,
     DEFAULT_HISTORY_PREFER_LIVE,
+    DEFAULT_HISTORY_STATES,
+    DEFAULT_HISTORY_STATES_STEP,
     DOMAIN,
+    HISTORY_DEVICE_SENSOR_KEYS,
+    HISTORY_DEVICE_SOURCE,
     HISTORY_EXPORT_MAX_PAGES,
     HISTORY_EXPORT_PAGE_ROWS,
     HISTORY_FOLLOWUP_HOUR_MARGIN,
     HISTORY_FOLLOWUP_MORE_DELAY,
     HISTORY_FUTURE_SKEW,
+    HISTORY_GAPS_MAX,
+    HISTORY_HOUR_SETTLE,
+    HISTORY_IMPORT_GENERATION,
+    HISTORY_KEPT_MAX_AGE,
     HISTORY_MAX_AGE_DAYS,
     HISTORY_MAX_FILE_BYTES,
     HISTORY_MAX_FILES_PER_SYNC,
@@ -76,10 +101,14 @@ from .const import (
     HISTORY_STORAGE_VERSION,
     HISTORY_TS_MS_THRESHOLD,
     MAX_PID_KEY_LENGTH,
+    PID_VALUE_DECIMALS,
 )
 from .exceptions import MeatPiApiError
+from .history_states import StateSeries, async_fill_states
+from .history_units import unit_converter
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from datetime import datetime
 
     from homeassistant.core import HomeAssistant
@@ -114,6 +143,9 @@ class HistorySyncResult:
     hours_imported: int = 0
     hours_skipped_existing: int = 0  # prefer_live: live hours left alone
     hours_overwritten_live: int = 0  # default: recorded hours replaced live ones
+    # hours imported from the rows an earlier pull kept, the device not
+    # answering (or not having them any more) when they had ended
+    hours_from_kept_copy: int = 0
     pids_imported: int = 0
     pids_skipped: int = 0
     errors: list[str] = field(default_factory=list)
@@ -122,6 +154,7 @@ class HistorySyncResult:
     more_pending: bool = False  # the device has more than one run could take
     followup_in: float | None = None  # seconds until a follow-up run is due
     device: dict[str, Any] | None = None  # the device logger's state
+    states: dict[str, Any] | None = None  # the History fill (history_states.py)
     finished_at: float | None = None  # epoch seconds
 
 
@@ -147,6 +180,38 @@ class _Bucket:
     @property
     def mean(self) -> float:
         return self.total / self.count
+
+    def as_list(self) -> list[float]:
+        """The figures as they are kept between two runs."""
+        return [self.total, self.count, self.minimum, self.maximum]
+
+    @classmethod
+    def from_list(cls, figures: Any) -> _Bucket | None:
+        """A kept bucket back, or None when it is not one."""
+        if not isinstance(figures, list) or len(figures) != 4:
+            return None
+        total, count, minimum, maximum = (_coerce_float(item) for item in figures)
+        if (
+            total is None
+            or minimum is None
+            or maximum is None
+            or count is None
+            or count < 1
+            or count != int(count)
+            or minimum > maximum
+        ):
+            return None
+        return cls(total=total, count=int(count), minimum=minimum, maximum=maximum)
+
+
+@dataclass(slots=True)
+class _Target:
+    """The sensor a logged name fills, and the units on both sides."""
+
+    entity_id: str
+    unit: str | None  # the unit Home Assistant shows the sensor in (its states)
+    logged_unit: str | None  # the unit of the device's values
+    decimals: int = PID_VALUE_DECIMALS  # of a state written for it
 
 
 @dataclass(slots=True)
@@ -278,9 +343,12 @@ def normalize_row(raw: Any) -> tuple[float, str, float] | None:
     Accepts dict rows with aliased field names. The firmware's rows name
     the parameter ``<source>.<name>`` (``autopid.SOC``): the name after
     the last dot is the push's ``autopid_data`` key, which is what the PID
-    entity is registered under. Anything malformed (non-dict, missing
-    fields, non-finite values, absurd names) is rejected; the caller
-    counts rejects, a bad row never aborts a sync.
+    entity is registered under. A value of the device itself
+    (``device.batt_voltage``, firmware 6.0.0-beta.15) keeps its source in
+    the name, so it never meets a PID of the same name; a device key this
+    integration has no sensor for is rejected. Anything malformed (non-dict,
+    missing fields, non-finite values, absurd names) is rejected; the
+    caller counts rejects, a bad row never aborts a sync.
     """
     ts = row_timestamp(raw)
     if ts is None:
@@ -294,9 +362,13 @@ def normalize_row(raw: Any) -> tuple[float, str, float] | None:
         return None
     name = name.strip()
     if "." in name:
-        name = name.rsplit(".", 1)[1]
+        source, _, name = name.rpartition(".")
         if not name:
             return None
+        if source == HISTORY_DEVICE_SOURCE:
+            if name not in HISTORY_DEVICE_SENSOR_KEYS:
+                return None
+            name = f"{HISTORY_DEVICE_SOURCE}.{name}"
     value = _coerce_float(_first_key(raw, _VALUE_KEYS))
     if value is None:
         return None
@@ -348,6 +420,67 @@ def parse_csv(text: str) -> tuple[list[dict[str, Any]], int]:
     except csv.Error:
         return rows, bad + 1
     return rows, bad
+
+
+def open_hour(now_ts: float) -> int:
+    """The start of the first hour that is not imported yet.
+
+    The hour still running; or the one before it while that one has been
+    over for less than ``HISTORY_HOUR_SETTLE`` seconds (Home Assistant
+    writes its own row of an hour ten seconds past its end, and must find
+    no row of ours there).
+    """
+    return int((now_ts - HISTORY_HOUR_SETTLE) // 3600) * 3600
+
+
+def split_kept(
+    kept: dict[str, Any],
+    now_ts: float,
+    covered: set[tuple[str, int]],
+) -> tuple[dict[str, Any], dict[str, dict[int, _Bucket]]]:
+    """Sort the hours kept between two runs.
+
+    Returns (the hours that are not over yet, as they are kept; the
+    buckets of the ended hours, per name, without the (name, hour) pairs
+    in ``covered``). Hours kept for longer than ``HISTORY_KEPT_MAX_AGE``
+    and anything that is not a kept hour are dropped.
+    """
+    limit = open_hour(now_ts)
+    left: dict[str, Any] = {}
+    buckets: dict[str, dict[int, _Bucket]] = {}
+    for hour_key, names in kept.items():
+        if not str(hour_key).isdigit() or not isinstance(names, dict):
+            continue
+        hour = int(hour_key)
+        if hour >= limit:
+            left[hour_key] = names
+        elif hour + 3600 >= now_ts - HISTORY_KEPT_MAX_AGE:
+            for name, figures in names.items():
+                bucket = _Bucket.from_list(figures)
+                if bucket is not None and (name, hour) not in covered:
+                    buckets.setdefault(name, {})[hour] = bucket
+    return left, buckets
+
+
+def statistics_rows(
+    hours: list[int],
+    buckets: dict[int, _Bucket],
+    convert: Callable[[float], float],
+) -> list[dict[str, Any]]:
+    """The statistics rows of one sensor's hours, in the unit they are kept in."""
+    rows: list[dict[str, Any]] = []
+    for hour in hours:
+        bucket = buckets[hour]
+        low, high = sorted((convert(bucket.minimum), convert(bucket.maximum)))
+        rows.append(
+            {
+                "start": dt_util.utc_from_timestamp(hour),
+                "mean": convert(bucket.mean),
+                "min": low,
+                "max": high,
+            },
+        )
+    return rows
 
 
 def _in_window(
@@ -417,17 +550,21 @@ def aggregate_rows(
     since: float,
     now_ts: float,
     result: HistorySyncResult,
+    deferred: dict[str, dict[int, _Bucket]] | None = None,
 ) -> dict[str, dict[int, _Bucket]]:
     """Aggregate raw rows into per-PID, per-hour buckets, bounded.
 
     Rows outside [since, current-hour) or beyond the sanity window are
-    rejected; rows of the current hour are deferred (counted apart, the
-    earliest kept in ``result.followup_in``'s reckoning). Returns
+    rejected; rows of the hour that is not imported yet (``open_hour``)
+    are deferred (counted apart, the earliest kept in
+    ``result.followup_in``'s reckoning) and, when ``deferred`` is given,
+    aggregated into it the same way: the caller keeps those figures for
+    the day the device does not answer the follow-up. Returns
     {pid_name: {hour_epoch: bucket}}. When the row cap is hit, hours the
     leftover rows could still touch are discarded so a partially
     aggregated hour is never imported.
     """
-    current_hour = int(now_ts // 3600) * 3600
+    current_hour = open_hour(now_ts)
     oldest = max(since, now_ts - HISTORY_MAX_AGE_DAYS * 86400)
     buckets: dict[str, dict[int, _Bucket]] = {}
     used = 0
@@ -455,6 +592,11 @@ def aggregate_rows(
                 ts, now_ts=now_ts, current_hour=current_hour,
             ):
                 result.rows_deferred += 1
+                if deferred is not None and (
+                    name in deferred or len(deferred) < HISTORY_MAX_PIDS_PER_SYNC
+                ):
+                    hour = int(ts // 3600) * 3600
+                    deferred.setdefault(name, {}).setdefault(hour, _Bucket()).add(value)
             else:
                 result.rows_rejected += 1
             continue
@@ -523,7 +665,7 @@ def followup_delay(result: HistorySyncResult, now_ts: float) -> float | None:
     if result.more_pending:
         return float(HISTORY_FOLLOWUP_MORE_DELAY)
     if result.rows_deferred:
-        next_hour = (int(now_ts // 3600) + 1) * 3600
+        next_hour = open_hour(now_ts) + 3600
         return max(
             float(HISTORY_FOLLOWUP_MORE_DELAY),
             next_hour + HISTORY_FOLLOWUP_HOUR_MARGIN - now_ts,
@@ -544,6 +686,8 @@ class HistorySync:
         self._marks: list[_PageMark] = []
         self._end_cursor: str | None = None
         self._deferred_from: float | None = None
+        self._raw_rows: list[Any] = []
+        self._deferred_buckets: dict[str, dict[int, _Bucket]] = {}
 
     # -- the stored marks --------------------------------------------------
 
@@ -564,7 +708,99 @@ class HistorySync:
         return cursor if isinstance(cursor, str) and cursor else None
 
     async def _async_save(self, watermark: float, cursor: str | None) -> None:
-        await self._store.async_save({"watermark": watermark, "cursor": cursor})
+        data = await self._async_load()
+        data["watermark"] = watermark
+        data["cursor"] = cursor
+        await self._store.async_save(data)
+
+    async def _async_put(self, **values: Any) -> None:
+        """Store other things than the two marks (None removes one)."""
+        data = await self._async_load()
+        changed = False
+        for key, value in values.items():
+            if value is None:
+                if key in data:
+                    del data[key]
+                    changed = True
+            elif data.get(key) != value:
+                data[key] = value
+                changed = True
+        if changed:
+            await self._store.async_save(data)
+
+    async def _async_reread_after_upgrade(self) -> None:
+        """Read the log again, once, where an earlier version imported wrong.
+
+        Until 2.0.0-beta1 a logged value went into the statistics as it
+        came. For a sensor Home Assistant keeps in another unit than the
+        device logs (°F for °C, hPa for kPa) every imported hour is off
+        by the conversion. The device's log still holds those hours for a
+        while: with the marks back at zero the next runs read it from its
+        start and import them again, converted (bounded as every read is;
+        the default rule replaces the hours that are there). Entries
+        without such a sensor, and marks this version wrote, are left alone.
+        """
+        data = await self._async_load()
+        if data.get("generation") == HISTORY_IMPORT_GENERATION:
+            return
+        watermark = _coerce_float(data.get("watermark")) or 0.0
+        if watermark > 0:
+            pids = (getattr(self._entry, "data", None) or {}).get("pid_keys")
+            names = [name for name in pids if isinstance(name, str)] if isinstance(pids, list) else []
+            off = [
+                name
+                for name, target in self._resolve_entities(names).items()
+                if target.logged_unit
+                and target.unit
+                and target.logged_unit != target.unit
+                and unit_converter(target.logged_unit, target.unit) is not None
+            ]
+            if off:
+                _LOGGER.info(
+                    "History sync for %s: %d sensor(s) are kept in another unit "
+                    "than the device logs (%s); the device's log is read again "
+                    "from its start so the hours an earlier version imported "
+                    "unconverted are imported again",
+                    self._entry.title,
+                    len(off),
+                    ", ".join(off[:8]),
+                )
+                data["watermark"] = 0.0
+                data["cursor"] = None
+        data["generation"] = HISTORY_IMPORT_GENERATION
+        await self._store.async_save(data)
+
+    @staticmethod
+    def _stored_gaps(data: dict[str, Any]) -> list[tuple[float, float]]:
+        gaps: list[tuple[float, float]] = []
+        raw = data.get("gaps")
+        for item in raw if isinstance(raw, list) else []:
+            if isinstance(item, (list, tuple)) and len(item) == 2:
+                start, end = _coerce_float(item[0]), _coerce_float(item[1])
+                if start is not None and end is not None and end > start:
+                    gaps.append((start, end))
+        return gaps
+
+    async def _async_note_gaps(self, runtime: Any, now_ts: float) -> None:
+        """Remember the silences that ended since the last run.
+
+        A gap is (the last push before a silence, the push that ended it):
+        the time Home Assistant has no states of the device's sensors. The
+        History fill writes the logged values of that time; a gap stays
+        until the log was read over it.
+        """
+        take = getattr(getattr(runtime, "coordinator", None), "take_data_gaps", None)
+        fresh = take() if callable(take) else []
+        if not isinstance(fresh, list) or not fresh:
+            return
+        data = await self._async_load()
+        gaps = self._stored_gaps(data)
+        for item in fresh:
+            if isinstance(item, tuple) and len(item) == 2 and item[1] > item[0]:
+                gaps.append((float(item[0]), float(item[1])))
+        oldest = now_ts - HISTORY_MAX_AGE_DAYS * 86400
+        gaps = sorted({gap for gap in gaps if gap[1] > oldest})[-HISTORY_GAPS_MAX:]
+        await self._async_put(gaps=[list(gap) for gap in gaps])
 
     async def async_remove(self) -> None:
         """Delete the persisted marks (config entry removed)."""
@@ -763,6 +999,159 @@ class HistorySync:
                 break
         return rows
 
+    # -- the History page --------------------------------------------------
+
+    def _state_series(
+        self, gaps: list[tuple[float, float]], after: float,
+    ) -> list[StateSeries]:
+        """What this run's rows hold of the gaps, per sensor that takes states."""
+        first = min(gap[0] for gap in gaps)
+        last = max(gap[1] for gap in gaps)
+        by_name: dict[str, list[tuple[float, float]]] = {}
+        for raw in self._raw_rows:
+            row = normalize_row(raw)
+            if row is None or row[0] <= after or not first < row[0] < last:
+                continue
+            ts, name, value = row
+            if name in by_name or len(by_name) < HISTORY_MAX_PIDS_PER_SYNC:
+                by_name.setdefault(name, []).append((ts, value))
+        series: list[StateSeries] = []
+        for name, target in self._resolve_entities(list(by_name)).items():
+            convert = unit_converter(target.logged_unit, target.unit)
+            if convert is not None:
+                series.append(
+                    StateSeries(
+                        target.entity_id, by_name[name], convert, target.decimals,
+                    ),
+                )
+        return series
+
+    async def _async_fill_states(
+        self, now_ts: float, result: HistorySyncResult,
+    ) -> None:
+        """Write the logged values of the gaps as states (history_states.py)."""
+        options = getattr(self._entry, "options", None) or {}
+        enabled = bool(options.get(CONF_HISTORY_STATES, DEFAULT_HISTORY_STATES))
+        data = await self._async_load()
+        gaps = self._stored_gaps(data)
+        after = _coerce_float(data.get("states_until")) or 0.0
+        series = self._state_series(gaps, after) if enabled and gaps else []
+        policy = integration_policy(self._hass)
+        fill = await async_fill_states(
+            self._hass,
+            enabled=enabled,
+            approved=policy.history_states_schemas,
+            blocked=policy.history_states_blocked,
+            series=series,
+            gaps=gaps,
+            after_ts=after,
+            step=options.get(CONF_HISTORY_STATES_STEP, DEFAULT_HISTORY_STATES_STEP),
+        )
+        result.states = {
+            "active": fill.active,
+            "note": fill.note,
+            "recorder_schema": fill.recorder_schema,
+            "gaps": fill.gaps,
+            "rows_in_gaps": fill.rows_in_gaps,
+            "states_written": fill.states_written,
+            "sensors": fill.sensors,
+            # the spacing asked for in the options, the one this run wrote
+            # with (wider when the run was over its cap) and what the asked
+            # one alone came to
+            "step": fill.step,
+            "step_used": fill.step_used,
+            "states_at_step": fill.states_at_step,
+            "errors": list(fill.errors),
+        }
+        updates: dict[str, Any] = {}
+        if fill.until is not None and fill.until > after:
+            updates["states_until"] = fill.until
+        if (
+            gaps
+            and result.source == "export"
+            and not result.more_pending
+            and not fill.errors
+        ):
+            # the log was read to its end: every silence that ended before
+            # this run is dealt with (a write that failed is tried again)
+            left = [list(gap) for gap in gaps if gap[1] > now_ts]
+            if len(left) != len(gaps):
+                updates["gaps"] = left or None  # None removes the key
+        if updates:
+            try:
+                await self._async_put(**updates)
+            except Exception as err:  # storage failure: the fill repeats, harmlessly
+                _LOGGER.warning("History sync: saving the History marks failed: %s", err)
+
+    # -- the hours kept between two runs ------------------------------------
+
+    async def _async_keep_deferred(self, result: HistorySyncResult) -> None:
+        """Keep the hourly figures of the rows this run deferred.
+
+        The next run reads those rows again from the device (the cursor
+        rolls back for them); the copy is for the run that finds the
+        device asleep. A later pull's figures replace an earlier pull's
+        unless they hold fewer rows (the device retired the file).
+        """
+        if not result.ran or not self._deferred_buckets:
+            return
+        try:
+            data = await self._async_load()
+            kept = data.get("kept")
+            kept = dict(kept) if isinstance(kept, dict) else {}
+            for name, hours in self._deferred_buckets.items():
+                for hour, bucket in hours.items():
+                    slot = kept.get(str(hour))
+                    slot = dict(slot) if isinstance(slot, dict) else {}
+                    old = _Bucket.from_list(slot.get(name))
+                    if old is None or bucket.count >= old.count:
+                        slot[name] = bucket.as_list()
+                    kept[str(hour)] = slot
+            await self._async_put(kept=kept)
+        except Exception as err:  # storage failure: only the copy is missing
+            _LOGGER.warning("History sync: keeping the deferred hours failed: %s", err)
+
+    async def _async_import_kept(
+        self,
+        now_ts: float,
+        result: HistorySyncResult,
+        covered: set[tuple[str, int]],
+    ) -> None:
+        """Import the kept hours that have ended and this run did not get.
+
+        ``covered`` names the (sensor name, hour) pairs this run imported
+        from the device's own rows: their copies are dropped unused. The
+        watermark does not move for an hour imported from a copy, so the
+        device's rows of that hour replace it at its next wake.
+        """
+        try:
+            data = await self._async_load()
+            kept = data.get("kept")
+            if not isinstance(kept, dict) or not kept:
+                return
+            left, buckets = split_kept(kept, now_ts, covered)
+            resolved = self._resolve_entities(list(buckets)) if buckets else {}
+            if resolved:
+                earliest = min(hour for name in resolved for hour in buckets[name])
+                existing = await self._async_existing_hours(
+                    {target.entity_id for target in resolved.values()},
+                    dt_util.utc_from_timestamp(earliest),
+                )
+                before = result.hours_imported
+                _, failed_floor = await self._async_import_buckets(
+                    resolved, buckets, existing, result,
+                )
+                result.hours_from_kept_copy += result.hours_imported - before
+                if failed_floor is not None:
+                    # the recorder refused: the copies stay for the next run
+                    for hour_key, names in kept.items():
+                        if str(hour_key).isdigit() and int(hour_key) >= failed_floor:
+                            left.setdefault(hour_key, names)
+            await self._async_put(kept=left or None)
+        except Exception as err:  # the copy is a second chance, never a failure
+            _LOGGER.warning("History sync: importing the kept hours failed: %s", err)
+            result.errors.append(f"kept hours: {err}")
+
     # -- importing ---------------------------------------------------------
 
     async def _async_existing_hours(
@@ -838,17 +1227,47 @@ class HistorySync:
             "has_sum": False,
         }
 
-    def _resolve_entities(
-        self,
-        pid_names: list[str],
-    ) -> dict[str, tuple[str, str | None]]:
-        """Map PID names to (entity_id, unit) for PIDs that back entities."""
+    def _logged_unit(self, name: str, device_key: str | None) -> str | None:
+        """The unit the device's values of this name are in, when known."""
+        if device_key is not None:
+            for description in SENSOR_DESCRIPTIONS:
+                if description.key == device_key:
+                    return description.native_unit_of_measurement
+            return None
+        # the sensor as it runs; else as its stored description builds it
+        from .sensor import (  # noqa: PLC0415  (sensor.py imports this package)
+            DYNAMIC_PID_SENSORS,
+            _build_pid_entity_description,
+        )
+
+        entity = DYNAMIC_PID_SENSORS.get(self._entry.entry_id, {}).get(name)
+        if entity is not None:
+            return entity.native_unit_of_measurement
+        config = (getattr(self._entry, "data", None) or {}).get("config")
+        pid_config = config.get(name) if isinstance(config, dict) else None
+        if isinstance(pid_config, dict):
+            return _build_pid_entity_description(
+                name, pid_config,
+            ).native_unit_of_measurement
+        return None
+
+    def _resolve_entities(self, names: list[str]) -> dict[str, _Target]:
+        """Map logged names to the sensors they fill.
+
+        A PID name fills the PID sensor of that name; ``device.<key>`` the
+        status sensor of that key. Names without a sensor are left out.
+        """
         registry = er.async_get(self._hass)
-        resolved: dict[str, tuple[str, str | None]] = {}
-        for name in pid_names:
-            entity_id = registry.async_get_entity_id(
-                "sensor", DOMAIN, f"{self._entry.entry_id}_pid_{name}",
+        resolved: dict[str, _Target] = {}
+        prefix = f"{HISTORY_DEVICE_SOURCE}."
+        for name in names:
+            device_key = name[len(prefix):] if name.startswith(prefix) else None
+            unique_id = (
+                f"{self._entry.entry_id}_{device_key}"
+                if device_key is not None
+                else f"{self._entry.entry_id}_pid_{name}"
             )
+            entity_id = registry.async_get_entity_id("sensor", DOMAIN, unique_id)
             if entity_id is None:
                 continue
             registry_entry = registry.async_get(entity_id)
@@ -857,7 +1276,16 @@ class HistorySync:
                 if registry_entry is not None
                 else None
             )
-            resolved[name] = (entity_id, unit)
+            try:
+                logged_unit = self._logged_unit(name, device_key)
+            except Exception:  # a description that does not build
+                logged_unit = None
+            resolved[name] = _Target(
+                entity_id,
+                unit,
+                logged_unit,
+                6 if name in ("gps_latitude", "gps_longitude") else PID_VALUE_DECIMALS,
+            )
         return resolved
 
     def _prefer_live(self) -> bool:
@@ -868,7 +1296,7 @@ class HistorySync:
 
     async def _async_import_buckets(
         self,
-        resolved: dict[str, tuple[str, str | None]],
+        resolved: dict[str, _Target],
         buckets: dict[str, dict[int, _Bucket]],
         existing_hours: dict[str, set[int]],
         result: HistorySyncResult,
@@ -887,41 +1315,48 @@ class HistorySync:
         recorded ones (the log is the complete record of that hour) unless
         the entry prefers the live statistics, in which case they are
         skipped.
+
+        The device logs in its own unit; the figures are converted into
+        the unit the sensor's statistics are kept in. A sensor whose two
+        units Home Assistant cannot convert between is not imported (and,
+        like a sum-type one, does not hold the watermark).
         """
         prefer_live = self._prefer_live()
         max_imported_ts = 0.0
         failed_floor: float | None = None
-        for name, (entity_id, unit) in resolved.items():
+        for name, target in resolved.items():
+            entity_id = target.entity_id
             taken = existing_hours.get(entity_id, set())
             pending: list[int] = []
-            statistics = []
             skipped_hours = 0
             overwritten = 0
-            for hour, bucket in sorted(buckets[name].items()):
+            for hour in sorted(buckets[name]):
                 if hour in taken:
                     if prefer_live:
                         skipped_hours += 1
                         continue
                     overwritten += 1
                 pending.append(hour)
-                statistics.append(
-                    {
-                        "start": dt_util.utc_from_timestamp(hour),
-                        "mean": bucket.mean,
-                        "min": bucket.minimum,
-                        "max": bucket.maximum,
-                    },
-                )
             result.hours_skipped_existing += skipped_hours
-            if not statistics:
+            if not pending:
                 continue
             try:
-                metadata = await self._async_entity_metadata(entity_id, unit)
+                metadata = await self._async_entity_metadata(entity_id, target.unit)
                 if metadata is None:
                     result.errors.append(
                         f"{entity_id}: incompatible existing statistics",
                     )
                     continue
+                kept_unit = metadata.get("unit_of_measurement")
+                convert = unit_converter(target.logged_unit, kept_unit)
+                if convert is None:
+                    result.errors.append(
+                        f"{entity_id}: the device logs {target.logged_unit}, the "
+                        f"statistics are kept in {kept_unit} and Home Assistant "
+                        "has no conversion between the two: not imported",
+                    )
+                    continue
+                statistics = statistics_rows(pending, buckets[name], convert)
                 async_import_statistics(self._hass, metadata, statistics)  # type: ignore[arg-type]
             except Exception as err:  # isolate per PID
                 _LOGGER.warning(
@@ -932,7 +1367,7 @@ class HistorySync:
                     failed_floor = float(pending[0])
                 continue
             result.pids_imported += 1
-            result.hours_imported += len(statistics)
+            result.hours_imported += len(pending)
             result.hours_overwritten_live += overwritten
             last_hour_end = max(hour for hour in buckets[name]) + 3600
             max_imported_ts = max(max_imported_ts, last_hour_end)
@@ -944,7 +1379,7 @@ class HistorySync:
         since: float,
         now_ts: float,
         result: HistorySyncResult,
-    ) -> tuple[dict[str, tuple[str, str | None]], dict[str, dict[int, _Bucket]]] | None:
+    ) -> tuple[dict[str, _Target], dict[str, dict[int, _Bucket]]] | None:
         """Fetch, aggregate, and resolve; None when there is nothing to import."""
         try:
             raw_rows = await self._async_fetch_export(api, since, result)
@@ -959,10 +1394,11 @@ class HistorySync:
 
         result.ran = True
         result.rows_fetched = len(raw_rows)
+        self._raw_rows = raw_rows
         if not raw_rows:
             return None
 
-        current_hour = int(now_ts // 3600) * 3600
+        current_hour = open_hour(now_ts)
         self._deferred_from = None
         for raw in raw_rows:
             ts = row_timestamp(raw)
@@ -972,7 +1408,11 @@ class HistorySync:
                 self._deferred_from = ts
 
         buckets = aggregate_rows(
-            raw_rows, since=since, now_ts=now_ts, result=result,
+            raw_rows,
+            since=since,
+            now_ts=now_ts,
+            result=result,
+            deferred=self._deferred_buckets,
         )
         if not buckets:
             return None
@@ -1001,16 +1441,36 @@ class HistorySync:
         """Run one catch-up pass. Never raises."""
         result = HistorySyncResult()
         runtime = getattr(self._entry, "runtime_data", None)
+        if runtime is None:
+            return result
         api = getattr(runtime, "api", None)
+        now_ts = dt_util.utcnow().timestamp()
+        self._raw_rows = []
+        self._deferred_buckets = {}
+        try:
+            await self._async_note_gaps(runtime, now_ts)
+        except Exception as err:  # the History fill's input only
+            _LOGGER.warning("History sync: noting the gaps failed: %s", err)
         if api is None:
+            # no address to ask: the hours an earlier pull kept still go in
+            await self._async_import_kept(now_ts, result, set())
             return result
 
-        now_ts = dt_util.utcnow().timestamp()
+        try:
+            await self._async_reread_after_upgrade()
+        except Exception as err:  # the marks stay as they are
+            _LOGGER.warning("History sync: the marks could not be checked: %s", err)
         watermark = await self.async_get_watermark()
         since = max(watermark, now_ts - HISTORY_MAX_AGE_DAYS * 86400)
 
         collected = await self._async_collect(api, since, now_ts, result)
+        if result.ran:
+            # the History page first: states have no hourly rule, the whole
+            # away time shows the moment the car is home
+            await self._async_fill_states(now_ts, result)
         if collected is None:
+            await self._async_import_kept(now_ts, result, set())
+            await self._async_keep_deferred(result)
             await self._async_finish(result, watermark, watermark, None, now_ts)
             return result
         resolved, buckets = collected
@@ -1020,7 +1480,7 @@ class HistorySync:
         )
         try:
             existing_hours = await self._async_existing_hours(
-                {entity_id for entity_id, _ in resolved.values()},
+                {target.entity_id for target in resolved.values()},
                 dt_util.utc_from_timestamp(earliest_hour),
             )
         except Exception as err:  # recorder unavailable: never break setup
@@ -1039,6 +1499,16 @@ class HistorySync:
             new_watermark = min(new_watermark, failed_floor)
         if not result.pids_imported or new_watermark <= watermark:
             new_watermark = watermark
+
+        # what an earlier pull kept and this one did not bring (the device
+        # lost the rows): imported from the copy; then this run's own
+        # deferred hours are kept for the next one
+        await self._async_import_kept(
+            now_ts,
+            result,
+            {(name, hour) for name in resolved for hour in buckets[name]},
+        )
+        await self._async_keep_deferred(result)
 
         await self._async_finish(result, watermark, new_watermark, failed_floor, now_ts)
 
@@ -1116,6 +1586,33 @@ async def async_sync_history(
     except Exception:  # Defensive: the catch-up must never break anything else.
         _LOGGER.exception("Unexpected error during history sync")
         return HistorySyncResult()
+
+
+async def async_kept_hours_due_in(
+    hass: HomeAssistant,
+    entry: MeatPiConfigEntry,
+) -> float | None:
+    """Seconds until the earliest kept hour can be imported; None for none.
+
+    Home Assistant restarted between the pull at the car's return and the
+    end of that hour: the follow-up's timer is gone with the old run, the
+    kept hours are on disk. The entry's setup books a run with this.
+    """
+    try:
+        data = await HistorySync(hass, entry)._async_load()  # noqa: SLF001
+    except Exception:  # storage unreadable: nothing kept
+        return None
+    kept = data.get("kept")
+    hours = [
+        int(key) for key in (kept if isinstance(kept, dict) else {}) if str(key).isdigit()
+    ]
+    if not hours:
+        return None
+    now_ts = dt_util.utcnow().timestamp()
+    return max(
+        float(HISTORY_FOLLOWUP_MORE_DELAY),
+        min(hours) + 3600 + HISTORY_FOLLOWUP_HOUR_MARGIN - now_ts,
+    )
 
 
 async def async_remove_history_store(

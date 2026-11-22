@@ -1,6 +1,13 @@
 {
   "schema": 1,
   "_comment": "Bundled fallback copy of the MeatPi device catalog. The living document is published at https://github.com/meatpiHQ/meatpi-devices and fetched at runtime; keep this copy in sync when cutting releases. Reserved slugs (wican, wican_usb, wican_pro, meatpi) are extend-only: entries here may add sensors, while identity, capabilities, and firmware matching stay in code.",
+  "integration": {
+    "_comment": "About the integration itself. history_states: the recorder database versions (SCHEMA_VERSION in homeassistant/components/recorder/db_schema.py) the History fill may write to on top of the ones built into the installed integration, and the ones it must not write to. Add a version only after `test.ps1 hadrive` passed on a Home Assistant that has it.",
+    "history_states": {
+      "recorder_schemas": [53],
+      "blocked_recorder_schemas": []
+    }
+  },
   "device_types": {
     "wican": {
       "model": "WiCAN OBD",

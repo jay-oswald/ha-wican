@@ -41,6 +41,8 @@ def _history_sync_diagnostics(config_entry: MeatPiConfigEntry) -> dict[str, Any]
         "hours_imported": result.hours_imported,
         "hours_skipped_existing": result.hours_skipped_existing,
         "hours_overwritten_live": result.hours_overwritten_live,
+        "hours_from_kept_copy": result.hours_from_kept_copy,
+        "states": result.states,
         "pids_imported": result.pids_imported,
         "pids_skipped": result.pids_skipped,
         "errors": list(result.errors),

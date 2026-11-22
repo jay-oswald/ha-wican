@@ -116,6 +116,61 @@ HISTORY_TS_MS_THRESHOLD = 100_000_000_000
 HISTORY_FOLLOWUP_HOUR_MARGIN = 90
 HISTORY_FOLLOWUP_MORE_DELAY = 60
 HISTORY_MAX_FOLLOWUPS = 20
+# An hour is imported only once it has been over for this long. Home
+# Assistant writes each sensor's row of an hour itself, ten seconds past
+# the top of the next one, without looking whether a row is there: a row
+# imported before that makes its write fail, and that write carries the
+# hour of EVERY sensor of the installation (recorder/statistics.py,
+# _compile_hourly_statistics). The follow-up's margin above is past this.
+HISTORY_HOUR_SETTLE = 30
+
+# Values of the device itself in its log (firmware 6.0.0-beta.15): rows
+# named ``device.<key>`` with the key of the status push. They fill the
+# status sensor of that key, never a PID sensor of the same name.
+HISTORY_DEVICE_SOURCE = "device"
+HISTORY_DEVICE_SENSOR_KEYS = frozenset({"batt_voltage"})
+
+# The last hour of a drive (2.0.0-beta2). The rows of the hour still
+# running are kept (their hourly figures, per sensor) and imported from
+# that copy when the hour has ended and the device does not answer: it
+# went to sleep a few minutes after it got home. Hours kept longer than
+# this are dropped unimported.
+HISTORY_KEPT_MAX_AGE = 7 * 86400
+# The stored marks say which import wrote them. Marks without it are from
+# a version that imported the logged number unconverted: when the entry
+# has a sensor Home Assistant keeps in another unit than the device logs,
+# the device's log is read again from its start, once, and the hours it
+# still holds are imported again in the right unit.
+HISTORY_IMPORT_GENERATION = 2
+
+# The History page (history_states.py): what the device logged while Home
+# Assistant heard nothing from it, written as states of that time. It
+# writes into the recorder's own table, so only on the recorder database
+# versions it was tested with (53: Home Assistant 2026.2.3, 2026.10.4 and
+# 2026.11.2, the firmware repository's `hadrive` and `habackfill`); the device
+# catalog can add a version or block one without an integration release
+# (``integration.history_states`` in device_catalog.json).
+CONF_HISTORY_STATES = "history_states"
+DEFAULT_HISTORY_STATES = True
+HISTORY_STATES_RECORDER_SCHEMAS = frozenset({53})
+# How dense the away time is drawn: a sensor gets a state when its value
+# changed and not sooner than this many seconds after its last one. An
+# option of the entry. 0 = every change the device logged, the finest
+# there is; measured on the bench Pi (SQLite, 2026-11-22) a state costs
+# about 110 bytes of database until the recorder purges it and 0.12 ms
+# of the recorder's time. The default of 1 s is every change for a value
+# the device reads once a second or less often (every usual poll table),
+# and holds a value read several times a second to 3,600 states an hour.
+CONF_HISTORY_STATES_STEP = "history_states_step"
+DEFAULT_HISTORY_STATES_STEP = 1
+MIN_HISTORY_STATES_STEP = 0
+MAX_HISTORY_STATES_STEP = 3600
+# One run's cap: 50,000 states are one write of about 6 s on that Pi.
+# A run over it widens its spacing instead (history_states.py).
+HISTORY_STATES_MAX_PER_RUN = 50_000
+HISTORY_STATES_WRITE_TIMEOUT = 120  # seconds the recorder gets for one write
+HISTORY_GAPS_MAX = 16  # silences remembered until the log was read over them
+CATALOG_MAX_RECORDER_SCHEMAS = 64
 
 # The GPS track (2026-11-06): the device serves the recorded fix as a GPX
 # document (GET /api/logger/gpx); the save_gpx service writes it under
@@ -141,7 +196,12 @@ SERVICE_SAVE_GPX = "save_gpx"
 ATTR_HOURS = "hours"
 DEFAULT_GPX_HOURS = 24
 MAX_GPX_HOURS = 24 * 30
-HISTORY_SYNC_MIN_INTERVAL = 300  # seconds between sync runs per entry
+# Seconds between two catch-up runs of one entry that pushes trigger. It
+# was 300 until 2.0.0-beta2: a car home again within five minutes of the
+# last run (Home Assistant's start, a short trip, WiFi at the edge of its
+# range) was read up to five minutes late, and a device that sleeps five
+# minutes after the engine stops was asleep by then.
+HISTORY_SYNC_MIN_INTERVAL = 30
 
 # Remote device catalog: declarative device-type definitions pulled from
 # GitHub (like params.json), so a new MeatPi product gets first-class

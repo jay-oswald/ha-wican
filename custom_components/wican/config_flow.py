@@ -17,15 +17,21 @@ from yarl import URL
 from .const import (
     CONF_DEVICE_TYPE,
     CONF_HISTORY_PREFER_LIVE,
+    CONF_HISTORY_STATES,
+    CONF_HISTORY_STATES_STEP,
     CONF_HISTORY_SYNC,
     CONF_KEEP_LAST_VALUES,
     CONF_POST_INTERVAL,
     DEFAULT_HISTORY_PREFER_LIVE,
+    DEFAULT_HISTORY_STATES,
+    DEFAULT_HISTORY_STATES_STEP,
     DEFAULT_HISTORY_SYNC,
     DEFAULT_KEEP_LAST_VALUES,
     DEFAULT_POST_INTERVAL,
     DOMAIN,
+    MAX_HISTORY_STATES_STEP,
     MAX_POST_INTERVAL,
+    MIN_HISTORY_STATES_STEP,
     MIN_POST_INTERVAL,
 )
 from .devices import DEVICE_TYPE_GENERIC, is_known_device_type
@@ -443,6 +449,21 @@ class MeatPiOptionsFlow(config_entries.OptionsFlow):
                         CONF_HISTORY_PREFER_LIVE, DEFAULT_HISTORY_PREFER_LIVE,
                     ),
                 ): bool,
+                vol.Required(
+                    CONF_HISTORY_STATES,
+                    default=options.get(CONF_HISTORY_STATES, DEFAULT_HISTORY_STATES),
+                ): bool,
+                vol.Required(
+                    CONF_HISTORY_STATES_STEP,
+                    default=options.get(
+                        CONF_HISTORY_STATES_STEP, DEFAULT_HISTORY_STATES_STEP,
+                    ),
+                ): vol.All(
+                    vol.Coerce(int),
+                    vol.Range(
+                        min=MIN_HISTORY_STATES_STEP, max=MAX_HISTORY_STATES_STEP,
+                    ),
+                ),
                 vol.Required(
                     CONF_KEEP_LAST_VALUES,
                     default=options.get(
