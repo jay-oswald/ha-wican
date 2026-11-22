@@ -153,7 +153,20 @@ HISTORY_IMPORT_GENERATION = 2
 CONF_HISTORY_STATES = "history_states"
 DEFAULT_HISTORY_STATES = True
 HISTORY_STATES_RECORDER_SCHEMAS = frozenset({53})
-HISTORY_STATES_MIN_STEP = 10  # seconds between two states of one sensor
+# How dense the away time is drawn: a sensor gets a state when its value
+# changed and not sooner than this many seconds after its last one. An
+# option of the entry. 0 = every change the device logged, the finest
+# there is; measured on the bench Pi (SQLite, 2026-11-22) a state costs
+# about 110 bytes of database until the recorder purges it and 0.12 ms
+# of the recorder's time. The default of 1 s is every change for a value
+# the device reads once a second or less often (every usual poll table),
+# and holds a value read several times a second to 3,600 states an hour.
+CONF_HISTORY_STATES_STEP = "history_states_step"
+DEFAULT_HISTORY_STATES_STEP = 1
+MIN_HISTORY_STATES_STEP = 0
+MAX_HISTORY_STATES_STEP = 3600
+# One run's cap: 50,000 states are one write of about 6 s on that Pi.
+# A run over it widens its spacing instead (history_states.py).
 HISTORY_STATES_MAX_PER_RUN = 50_000
 HISTORY_STATES_WRITE_TIMEOUT = 120  # seconds the recorder gets for one write
 HISTORY_GAPS_MAX = 16  # silences remembered until the log was read over them

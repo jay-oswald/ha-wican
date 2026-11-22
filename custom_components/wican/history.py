@@ -77,8 +77,10 @@ from .const import (
     CLOCK_JOURNAL_BOOT_SLACK_MS,
     CONF_HISTORY_PREFER_LIVE,
     CONF_HISTORY_STATES,
+    CONF_HISTORY_STATES_STEP,
     DEFAULT_HISTORY_PREFER_LIVE,
     DEFAULT_HISTORY_STATES,
+    DEFAULT_HISTORY_STATES_STEP,
     DOMAIN,
     HISTORY_DEVICE_SENSOR_KEYS,
     HISTORY_DEVICE_SOURCE,
@@ -1043,6 +1045,7 @@ class HistorySync:
             series=series,
             gaps=gaps,
             after_ts=after,
+            step=options.get(CONF_HISTORY_STATES_STEP, DEFAULT_HISTORY_STATES_STEP),
         )
         result.states = {
             "active": fill.active,
@@ -1052,6 +1055,12 @@ class HistorySync:
             "rows_in_gaps": fill.rows_in_gaps,
             "states_written": fill.states_written,
             "sensors": fill.sensors,
+            # the spacing asked for in the options, the one this run wrote
+            # with (wider when the run was over its cap) and what the asked
+            # one alone came to
+            "step": fill.step,
+            "step_used": fill.step_used,
+            "states_at_step": fill.states_at_step,
             "errors": list(fill.errors),
         }
         updates: dict[str, Any] = {}

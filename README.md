@@ -181,6 +181,7 @@ After setup, use the integration's **Configure** button:
 | **Post Interval** | 15 s | 1–3600 s | How often the device pushes data to Home Assistant. Lower values mean more frequent updates and more network traffic. |
 | **Backfill history from the device log** | on | on/off | When the device reconnects after being away, import the AutoPID data it logged to its SD card into each sensor's long-term statistics at the recorded times (see [History backfill](#history-backfill-offline-drives)). |
 | **Show the recorded drive on the History page too** | on | on/off | On: the values the device recorded while it was away are also written as states of that time, so the History page and each sensor's graph show the drive (see [Store and forward](#store-and-forward-history-catch-up-for-offline-drives)). It works on the Home Assistant versions it was tested with and switches itself off on others; the statistics are imported either way. Off: statistics only. |
+| **History detail: seconds between two points of one sensor** | 1 s | 0 to 3600 s | How dense the recorded drive is drawn on the History page: a sensor gets a point when its value changed, and not sooner than this many seconds after its last point. 0 = every change the device recorded. A smaller number costs database space and load time, a larger one can skip a short peak (see [History detail](#history-detail-how-dense-the-drive-is-drawn)). The statistics are not affected. |
 | **Keep the last values while the device is offline** | off | on/off | Off: the sensors and the location show as unavailable once the device stops sending data. On: they keep their last received value, and the Connected and Last seen sensors tell how current it is (see [How data updates work](#how-data-updates-work)). Set per device; takes effect immediately and nothing is sent to the device, so it can be changed while the car is asleep. |
 
 You can also change the device address later with the **Reconfigure** option
@@ -243,7 +244,9 @@ What to expect:
   live-recorded data is reduced to hourly statistics after the recorder
   retention window (default 10 days).
 - **History** shows the drive as soon as the car is home: a point whenever
-  a value changed, at most one every 10 seconds per sensor, in the unit
+  a value changed, at most one a second per sensor unless the
+  option **History detail** says otherwise (0 = every change, see
+  [History detail](#history-detail-how-dense-the-drive-is-drawn)), in the unit
   the sensor is shown in. Home Assistant has no official way to write a
   state of the past, so the integration writes into the recorder's own
   table. It does that only on the Home Assistant versions it was tested
@@ -303,7 +306,83 @@ the integration options. The diagnostics download carries the last run
 imported, the hours imported from the kept copy, the cursor, the
 follow-up, the device's logger state, and under `states` what the History
 fill did: whether it is active on this Home Assistant, the recorder
-database version, the states written, or the reason it wrote none).
+database version, the states written, the spacing asked for and used, or
+the reason it wrote none).
+
+#### History detail: how dense the drive is drawn
+
+The option **History detail: seconds between two points of one sensor**
+sets how many of the recorded values become points on the History page. A
+sensor gets a point when its recorded value changed, and not sooner than
+the set number of seconds after its last point.
+
+- **0 is the minimum: every change the device recorded.** There is nothing
+  finer to show: the device records a value each time it reads it from the
+  car (Store and forward records every reading; the logger's own setting
+  **Record parameters** can be set to changes only), and Home Assistant
+  itself keeps no second state of a value that did not change. A point
+  carries the moment the device read the value, to the millisecond. How
+  often a value is read is set by the device's poll table, not by this
+  option. On the test bench a table of 30 parameters gave each of them a
+  reading every 7.8 seconds; a table of 4 parameters polled every 100 ms
+  gave each a reading every 0.14 seconds, and History then held a point
+  for every change, some of them a fraction of a second apart.
+- **1 (the default)** is the same as 0 for every value the device reads
+  once a second or less often, which is every usual poll table, and holds
+  a value that is read several times a second to one point a second.
+- **The statistics are never thinned.** The hourly mean, min and max count
+  every recorded value, whatever is set here. With a spacing above 0 the
+  highest point of the History line can therefore be lower than the max of
+  the statistics of that hour: the peak lay between two points.
+
+What a choice costs, measured on a Raspberry Pi with Home Assistant's
+default SQLite database (2026-11-22): a point takes about 110 bytes of the
+database, the recorder writes about 8,500 points a second, and when the
+History page asks for a sensor with 50,000 points Home Assistant answers
+in 0.2 to 0.5 seconds with 2 MB for the browser to draw (it drew them).
+The points of a drive are purged with the rest of the recorder's states
+(after 10 days unless `purge_keep_days` says otherwise), so the cost does
+not add up over the months.
+
+| Set to | A sensor that changes every second, per hour of driving | What you see |
+|---|---|---|
+| 0 | 3,600 points, 0.4 MB | every change; the History line and the statistics agree |
+| 1 (the default) | 3,600 points, 0.4 MB | the same for this sensor; a value read several times a second is thinned to one point a second |
+| 5 | 720 points, 0.08 MB | a peak shorter than 5 s can be missing |
+| 10 | 360 points, 0.04 MB | a peak shorter than 10 s can be missing |
+| 60 | 60 points, 0.007 MB | the course of the drive, no detail |
+
+A sensor that is read every 8 seconds has 450 readings an hour at most, so
+for it every setting up to 8 is the same as 0.
+
+Two simulated drives on the test bench, all sensors together, per hour of
+driving:
+
+| The device's table | Readings logged | Points at 0 | at 1 | at 5 | at 10 | at 60 |
+|---|---|---|---|---|---|---|
+| 30 parameters, each read every 7.8 s | 14,300 | 3,400 (0.38 MB) | 3,400 | 3,400 | 2,350 (0.26 MB) | 810 |
+| 4 parameters, each read every 0.14 s | 104,800 | 7,200 (0.79 MB) | 4,600 (0.51 MB) | 1,670 | 1,210 (0.13 MB) | 315 |
+
+The simulated values of the second drive changed twice a second at most.
+A real signal read seven times a second can be another value at every
+reading: at 0 that table then gives up to 104,800 points an hour (11.5 MB),
+and the limit of one catch-up below is reached after half an hour of
+driving. The default of 1 holds that table to 14,400 points an hour
+(1.6 MB); 0 is for a table like that only when you want the full detail
+of short drives.
+
+Two limits hold whatever is set:
+
+- **One catch-up writes 50,000 points at most** (all sensors together; the
+  recorder is busy for about 6 seconds with that many on a Raspberry Pi,
+  and Home Assistant's own states wait that long). A catch-up that would
+  write more widens its spacing for that one run (1 s, then 2 s, 4 s and
+  so on) until it fits, instead of cutting the drive off in time, and says
+  so in the log ("written with a spacing of ..."). The diagnostics carry
+  the spacing asked for (`step`), the one used (`step_used`) and the
+  number of points the asked spacing came to (`states_at_step`).
+- **A change applies to the drives read after it.** A drive that is in
+  History already is not written again with another spacing.
 
 ### The GPS track (GPX)
 

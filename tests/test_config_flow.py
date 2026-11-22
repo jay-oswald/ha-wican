@@ -9,7 +9,7 @@ import pytest
 from homeassistant import config_entries
 from homeassistant.components.http import ApiConfig
 from homeassistant.core import HomeAssistant
-from homeassistant.data_entry_flow import FlowResultType
+from homeassistant.data_entry_flow import FlowResultType, InvalidData
 from homeassistant.helpers.service_info.zeroconf import ZeroconfServiceInfo
 from homeassistant.const import CONF_NAME, CONF_WEBHOOK_ID
 
@@ -579,6 +579,55 @@ async def test_options_flow_keep_last_values(
         result["flow_id"], user_input={"post_interval": 15},
     )
     assert result["data"]["keep_last_values"] is True
+
+
+async def test_options_flow_history_states_step(
+    hass: HomeAssistant,
+) -> None:
+    """The History spacing: 1 s unless chosen, 0 is a choice, outside 0 to 3600 is refused."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            CONF_WEBHOOK_ID: "test_webhook",
+            "mdns": "http://wican_test.local:80",
+        },
+        options={"post_interval": 15},
+    )
+    entry.add_to_hass(hass)
+
+    # Left alone, the form submits the default.
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    assert "history_states_step" in str(result["data_schema"])
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], user_input={"post_interval": 15},
+    )
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    assert result["data"]["history_states_step"] == 1
+
+    # 0 (every change) is a value like another, not "unset".
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"],
+        user_input={"post_interval": 15, "history_states_step": 0},
+    )
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    assert entry.options["history_states_step"] == 0
+
+    # Reopened, the form defaults to what is stored.
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], user_input={"post_interval": 15},
+    )
+    assert result["data"]["history_states_step"] == 0
+
+    for refused in (-1, 3601):
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        with pytest.raises(InvalidData):
+            await hass.config_entries.options.async_configure(
+                result["flow_id"],
+                user_input={"post_interval": 15, "history_states_step": refused},
+            )
+    assert entry.options["history_states_step"] == 0
 
 
 async def test_format_http_url_empty_string(

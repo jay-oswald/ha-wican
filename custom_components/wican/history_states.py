@@ -24,9 +24,17 @@ recorder's own ``states`` table, through a task on the recorder's thread
 What is written: for each sensor the device logged, the values of each
 gap (the time between the last push before a silence and the push that
 ended it), in the unit and the rounding of the sensor's states, one state
-when the value changed and not more often than every
-``HISTORY_STATES_MIN_STEP`` seconds. Each row takes the attributes of the
-sensor's newest state. Statistics are not touched here.
+when the value changed and not sooner than the entry's spacing after the
+sensor's last one (the option ``history_states_step``, in seconds; 0 = a
+state for every change the device logged, which is the finest there is:
+Home Assistant itself keeps no second state of an unchanged value). Each
+row takes the attributes of the sensor's newest state. Statistics are not
+touched here: they count every logged row, whatever the spacing.
+
+One run writes ``HISTORY_STATES_MAX_PER_RUN`` states at most. A run that
+would write more widens the spacing for that run (1 s, then doubling) and
+says so in the log and in the diagnostics, instead of cutting the drive
+off in time.
 """
 
 from __future__ import annotations
@@ -39,10 +47,12 @@ from typing import TYPE_CHECKING, Any
 from homeassistant.helpers.recorder import get_instance
 
 from .const import (
+    DEFAULT_HISTORY_STATES_STEP,
     HISTORY_STATES_MAX_PER_RUN,
-    HISTORY_STATES_MIN_STEP,
     HISTORY_STATES_RECORDER_SCHEMAS,
     HISTORY_STATES_WRITE_TIMEOUT,
+    MAX_HISTORY_STATES_STEP,
+    MIN_HISTORY_STATES_STEP,
 )
 
 try:  # recorder internals (see the module's notes)
@@ -81,6 +91,11 @@ _STATE_COLUMNS = (
 # One log line per reason and Home Assistant run, not one per sync.
 _SAID: set[str] = set()
 
+# How often a run over its cap may widen its spacing: 1 s doubled this
+# often is more than three months, and a gap that long is two states a
+# sensor (its first and its last), which every run can write.
+_WIDEN_ROUNDS = 24
+
 
 @dataclass(slots=True)
 class StateSeries:
@@ -105,6 +120,22 @@ class StateFillResult:
     sensors: int = 0
     until: float | None = None  # the newest logged moment this run dealt with
     errors: list[str] = field(default_factory=list)
+    step: float | None = None  # the spacing the entry asks for, seconds
+    step_used: float | None = None  # the spacing this run wrote with
+    states_at_step: int = 0  # what the asked spacing alone came to
+
+
+def coerce_step(value: Any) -> float:
+    """The spacing an entry asks for, in seconds; 0 = every change.
+
+    Anything that is not a number is the default; a number outside the
+    range is its nearest end.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return float(DEFAULT_HISTORY_STATES_STEP)
+    if value != value:  # not a number
+        return float(DEFAULT_HISTORY_STATES_STEP)
+    return float(min(max(value, MIN_HISTORY_STATES_STEP), MAX_HISTORY_STATES_STEP))
 
 
 def schema_allowed(
@@ -178,6 +209,7 @@ def thin(
     The first one; then one whenever the value is another than the last
     one written and ``min_step`` seconds have passed since; and the last
     one when the series ends on another value than the last one written.
+    With a ``min_step`` of 0 that is every change of the value.
     """
     out: list[tuple[float, str]] = []
     for ts, state in states:
@@ -193,11 +225,15 @@ def select_states(
     gaps: list[tuple[float, float]],
     after_ts: float,
     result: StateFillResult,
+    step: Any = DEFAULT_HISTORY_STATES_STEP,
 ) -> dict[str, list[tuple[float, str]]]:
     """Pick, convert and thin what one run writes: {entity_id: [(ts, state)]}.
 
-    More than ``HISTORY_STATES_MAX_PER_RUN`` states in one run are thinned
-    further (the step doubles) instead of being cut off in time.
+    ``step`` is the entry's spacing in seconds (0 = every change). More
+    than ``HISTORY_STATES_MAX_PER_RUN`` states in one run are thinned
+    further (the spacing goes to 1 s and doubles from there) instead of
+    being cut off in time; ``result`` says what was asked and what was
+    used. Pure, and run off the event loop: a long drive is many rows.
     """
     per_gap: dict[str, list[list[tuple[float, str]]]] = {}
     until = after_ts
@@ -222,16 +258,23 @@ def select_states(
             per_gap[item.entity_id] = formatted
     result.until = until if until > after_ts else None
 
-    step = float(HISTORY_STATES_MIN_STEP)
+    asked = coerce_step(step)
+    used = asked
+    result.step = asked
     chosen: dict[str, list[tuple[float, str]]] = {}
-    for _ in range(12):
+    for attempt in range(_WIDEN_ROUNDS + 1):
         chosen = {
-            entity_id: [state for segment in segments for state in thin(segment, step)]
+            entity_id: [state for segment in segments for state in thin(segment, used)]
             for entity_id, segments in per_gap.items()
         }
-        if sum(len(states) for states in chosen.values()) <= HISTORY_STATES_MAX_PER_RUN:
+        count = sum(len(states) for states in chosen.values())
+        if attempt == 0:
+            result.states_at_step = count
+        if count <= HISTORY_STATES_MAX_PER_RUN or attempt == _WIDEN_ROUNDS:
             break
-        step *= 2
+        # a spacing of 0 doubled stays 0: the first widening is one second
+        used = max(1.0, used * 2)
+    result.step_used = used
     return {entity_id: states for entity_id, states in chosen.items() if states}
 
 
@@ -349,9 +392,14 @@ async def async_fill_states(
     series: list[StateSeries],
     gaps: list[tuple[float, float]],
     after_ts: float,
+    step: Any = DEFAULT_HISTORY_STATES_STEP,
 ) -> StateFillResult:
-    """Write the logged values of the gaps as states. Never raises."""
-    result = StateFillResult(gaps=len(gaps))
+    """Write the logged values of the gaps as states. Never raises.
+
+    ``step``: the entry's spacing between two states of one sensor, in
+    seconds (0 = every change the device logged).
+    """
+    result = StateFillResult(gaps=len(gaps), step=coerce_step(step))
     if not enabled:
         result.note = "switched off in the options"
         return result
@@ -361,11 +409,22 @@ async def async_fill_states(
         result.recorder_schema = schema if isinstance(schema, int) else None
         result.note = why_not(instance, approved, blocked)
         result.active = result.note is None
-        states = (
-            select_states(series, gaps, after_ts, result)
-            if result.active and gaps and series
-            else {}
-        )
+        states: dict[str, list[tuple[float, str]]] = {}
+        if result.active and gaps and series:
+            states = await hass.async_add_executor_job(
+                select_states, series, gaps, after_ts, result, step,
+            )
+            if result.step_used != result.step:
+                _LOGGER.warning(
+                    "History fill: %d points at the spacing of %g s set in the "
+                    "options are more than one catch-up writes (%d); this one "
+                    "is written with a spacing of %g s (%d points)",
+                    result.states_at_step,
+                    result.step,
+                    HISTORY_STATES_MAX_PER_RUN,
+                    result.step_used,
+                    sum(len(found) for found in states.values()),
+                )
         if states:
             written, sensors, error = await _async_write(hass, instance, states)
             if error is not None:

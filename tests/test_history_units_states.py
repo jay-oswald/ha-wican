@@ -36,10 +36,13 @@ from custom_components.wican.catalog import (
 )
 from custom_components.wican.const import (
     CONF_HISTORY_STATES,
+    CONF_HISTORY_STATES_STEP,
+    DEFAULT_HISTORY_STATES_STEP,
     DOMAIN,
     HISTORY_HOUR_SETTLE,
     HISTORY_STATES_MAX_PER_RUN,
     HISTORY_STATES_RECORDER_SCHEMAS,
+    MAX_HISTORY_STATES_STEP,
 )
 from custom_components.wican.exceptions import MeatPiApiError
 from custom_components.wican.history import (
@@ -55,6 +58,7 @@ from custom_components.wican.history_states import (
     StateFillResult,
     StateSeries,
     async_fill_states,
+    coerce_step,
     format_state,
     points_in_gaps,
     schema_allowed,
@@ -675,6 +679,65 @@ def test_thinning() -> None:
     assert thin([], 10.0) == []
 
 
+def test_a_spacing_of_zero_is_every_change() -> None:
+    """history_states_step 0: a state for each change, none for a repeat."""
+    states = [(0.0, "1"), (2.0, "1"), (4.0, "2"), (6.0, "3"), (12.0, "3"), (30.0, "3"), (31.0, "4")]
+    assert thin(states, 0.0) == [(0.0, "1"), (4.0, "2"), (6.0, "3"), (31.0, "4")]
+
+    # four rows a second for 100 s, the value another one every half second
+    points = [(1000.0 + 0.25 * index, float(index // 2)) for index in range(400)]
+    series = [StateSeries("sensor.x", points, lambda value: value, 3)]
+    gaps = [(999.0, 2000.0)]
+    every = StateFillResult()
+    chosen = select_states(series, gaps, 0.0, every, 0)
+    assert len(chosen["sensor.x"]) == 200
+    assert (every.step, every.step_used, every.states_at_step) == (0.0, 0.0, 200)
+    # the same rows at a spacing of 10 s: one every 10 s and the last value
+    ten = StateFillResult()
+    chosen = select_states(series, gaps, 0.0, ten, 10)
+    assert [round(ts - 1000.0, 2) for ts, _ in chosen["sensor.x"]] == [
+        0.0, 10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0, 90.0, 99.75,
+    ]
+    assert (ten.step, ten.step_used) == (10.0, 10.0)
+    # and with nothing said: the default, one a second and the last value
+    plain = StateFillResult()
+    chosen = select_states(series, gaps, 0.0, plain)
+    assert DEFAULT_HISTORY_STATES_STEP == 1
+    assert [round(ts - 1000.0, 2) for ts, _ in chosen["sensor.x"]] == [
+        *[float(second) for second in range(100)], 99.75,
+    ]
+    assert (plain.step, plain.step_used) == (1.0, 1.0)
+
+
+def test_rows_exactly_one_spacing_apart_are_all_written() -> None:
+    """Millisecond stamps as float seconds: a spacing apart does not read as short of it.
+
+    The default spacing is one second and a usual poll table reads a value
+    once a second: every such reading must be a point.
+    """
+    # a value read every second, on the second and off it, at today's epoch
+    for first_ms in (1_795_310_000_000, 1_795_310_000_123, 1_795_310_000_999):
+        states = [((first_ms + 1000 * index) / 1000, str(index)) for index in range(600)]
+        assert len(thin(states, 1.0)) == 600
+        # the battery voltage: a row every 10 s at a spacing of 10 s
+        tens = [((first_ms + 10_000 * index) / 1000, str(index)) for index in range(600)]
+        assert len(thin(tens, 10.0)) == 600
+    # a row that is a millisecond short of the spacing still waits
+    short = [(1_795_310_000.000, "1"), (1_795_310_000.999, "2"), (1_795_310_001.998, "3")]
+    assert thin(short, 1.0) == [short[0], short[2]]
+
+
+def test_what_an_options_value_comes_to() -> None:
+    """A number inside the range as it is, outside its nearest end, junk the default."""
+    assert coerce_step(0) == 0.0
+    assert coerce_step(5) == 5.0
+    assert coerce_step(2.5) == 2.5
+    assert coerce_step(-3) == 0.0
+    assert coerce_step(10**6) == float(MAX_HISTORY_STATES_STEP)
+    for junk in (None, "5", True, float("nan"), [5]):
+        assert coerce_step(junk) == float(DEFAULT_HISTORY_STATES_STEP)
+
+
 def test_a_run_writes_no_more_than_its_cap() -> None:
     """Too many states for one run: thinned further, not cut off in time."""
     count = HISTORY_STATES_MAX_PER_RUN + 5000
@@ -691,6 +754,27 @@ def test_a_run_writes_no_more_than_its_cap() -> None:
     assert chosen["sensor.x"][0][0] == 1000.0
     assert chosen["sensor.x"][-1][0] == points[-1][0]
     assert result.until == points[-1][0]
+
+
+def test_a_run_over_its_cap_widens_a_spacing_of_zero() -> None:
+    """0 doubled is still 0: the first widening is one second, then it doubles."""
+    count = HISTORY_STATES_MAX_PER_RUN + 5000
+    points = [(1000.0 + index, float(index)) for index in range(count)]  # a change a second
+    result = StateFillResult()
+    chosen = select_states(
+        [StateSeries("sensor.x", points, lambda value: value, 3)],
+        [(999.0, 1000.0 + count)],
+        0.0,
+        result,
+        0,
+    )
+    assert result.step == 0.0
+    assert result.states_at_step == count
+    # 1 s keeps every row of this series, 2 s every second one
+    assert result.step_used == 2.0
+    assert len(chosen["sensor.x"]) == count // 2 + 1
+    assert chosen["sensor.x"][0][0] == 1000.0
+    assert chosen["sensor.x"][-1][0] == points[-1][0]
 
 
 # ---------------------------------------------------------------------------
@@ -898,6 +982,94 @@ async def test_a_drive_shows_in_history_after_the_return(
     off = await async_sync_history(hass, entry)
     assert off.states["active"] is False
     assert off.states["states_written"] == 0
+
+
+async def test_a_run_over_its_cap_says_so(
+    recorder_mock: Recorder,
+    hass: HomeAssistant,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The spacing asked for, the one used and the reason are told, and written."""
+    now = dt_util.utcnow()
+    hass.states.async_set("sensor.coolant", "80", {"unit_of_measurement": "°C"})
+    await async_wait_recording_done(hass)
+    start = now.timestamp() - 3600
+    points = [(start + 10.0 * index, 30.0 + index) for index in range(40)]
+    with patch("custom_components.wican.history_states.HISTORY_STATES_MAX_PER_RUN", 20):
+        result = await async_fill_states(
+            hass,
+            enabled=True,
+            approved=(),
+            blocked=(),
+            series=[StateSeries("sensor.coolant", points, lambda value: value, 3)],
+            gaps=[(start - 5, start + 1000)],
+            after_ts=0.0,
+            step=0,
+        )
+    # 40 changes are over the cap of 20; rows 10 s apart: 16 s still leaves
+    # 21 (every second one and the last), 32 s leaves 11
+    assert (result.step, result.step_used, result.states_at_step) == (0.0, 32.0, 40)
+    assert result.states_written == 11
+    assert result.errors == []
+    assert "written with a spacing of 32 s (11 points)" in caplog.text
+    found = await _states_of(hass, "sensor.coolant", now - timedelta(hours=2))
+    past = [state for state in found if state.last_updated.timestamp() < now.timestamp() - 60]
+    assert len(past) == 11
+    assert past[0].last_updated.timestamp() == pytest.approx(start)
+    assert past[-1].last_updated.timestamp() == pytest.approx(points[-1][0])
+
+
+async def test_the_spacing_of_the_history_points_is_the_entrys_option(
+    recorder_mock: Recorder,
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+) -> None:
+    """history_states_step: 10 s unless set, 0 = every change, a number spaces them."""
+    entry = await _entry(hass, mock_config_entry, pids={"SOC": ("%", "%")})
+    entity_id = er.async_get(hass).async_get_entity_id(
+        "sensor", DOMAIN, f"{entry.entry_id}_pid_SOC",
+    )
+    now = dt_util.utcnow().timestamp()
+    hass.states.async_set(entity_id, "90", {"unit_of_measurement": "%"})
+    await async_wait_recording_done(hass)
+
+    async def away(left: float, step: int | None) -> tuple[dict[str, Any], list[float]]:
+        """A silence of 100 s, a value every half second for 30 s of it, read with that option."""
+        if step is not None:
+            hass.config_entries.async_update_entry(
+                entry, options={**entry.options, CONF_HISTORY_STATES_STEP: step},
+            )
+            await hass.async_block_till_done()
+        entry.runtime_data.api = AsyncMock(spec=MeatPiApiClient)
+        entry.runtime_data.api.async_get_logger_status = AsyncMock(return_value=None)
+        entry.runtime_data.api.async_get_clock_journal = AsyncMock(return_value=[])
+        entry.runtime_data.coordinator._data_gaps.append((left, left + 100))  # noqa: SLF001
+        entry.runtime_data.api.async_export_log_rows = _one_page(
+            [
+                {"ts": (left + 10) * 1000 + 500 * index, "param": "autopid.SOC", "value": 80 - index}
+                for index in range(60)
+            ],
+        )
+        result = await async_sync_history(hass, entry)
+        found = await _states_of(hass, entity_id, dt_util.utc_from_timestamp(left - 60))
+        return result.states, [
+            round(state.last_updated.timestamp() - left, 1)
+            for state in found
+            if left < state.last_updated.timestamp() < left + 100
+        ]
+
+    # nothing set: a point a second, and the value the drive ended on
+    states, at = await away(float(int(now)) - 3000, None)
+    assert at == [*[10.0 + second for second in range(30)], 39.5]
+    assert (states["step"], states["step_used"], states["states_at_step"]) == (1.0, 1.0, 31)
+    # 0: every change the device logged
+    states, at = await away(float(int(now)) - 2000, 0)
+    assert at == [10.0 + 0.5 * index for index in range(60)]
+    assert (states["step"], states["step_used"], states["states_written"]) == (0.0, 0.0, 60)
+    # 10: the first, one every 10 s, and the last value
+    states, at = await away(float(int(now)) - 1000, 10)
+    assert at == [10.0, 20.0, 30.0, 39.5]
+    assert (states["step"], states["states_written"]) == (10.0, 4)
 
 
 # ---------------------------------------------------------------------------
