@@ -22,6 +22,7 @@ from .const import (
     DEFAULT_POST_INTERVAL,
     DEVICE_STALE_FACTOR,
     DOMAIN,
+    HISTORY_GAPS_MAX,
     LAST_SEEN_KEY,
     MAX_COORDINATOR_KEYS,
     MIN_DEVICE_STALE_SECONDS,
@@ -74,6 +75,11 @@ class MeatPiDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.config_entry = config_entry
         self._data: dict[str, Any] = {}
         self._last_push: datetime | None = None
+        # The silences that ended since the catch-up last asked: (the last
+        # push before, the push that ended it), epoch seconds. The time
+        # between the two has no states of this device's sensors; the
+        # catch-up writes the logged values of that time (history.py).
+        self._data_gaps: list[tuple[float, float]] = []
         self._key_cap_warned = False
         self._keep_last_values = self._keep_last_values_option()
 
@@ -89,6 +95,11 @@ class MeatPiDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     def last_push(self) -> datetime | None:
         """When the device last pushed data (None before the first push)."""
         return self._last_push
+
+    def take_data_gaps(self) -> list[tuple[float, float]]:
+        """Hand over the silences that ended since the last call."""
+        gaps, self._data_gaps = self._data_gaps, []
+        return gaps
 
     @property
     def device_online(self) -> bool | None:
@@ -253,8 +264,14 @@ class MeatPiDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # Detect a resumed-after-gap push BEFORE stamping the new push time.
         resumed_after_gap = False
         if self._last_push is not None:
-            elapsed = (dt_util.utcnow() - self._last_push).total_seconds()
+            now = dt_util.utcnow()
+            elapsed = (now - self._last_push).total_seconds()
             resumed_after_gap = elapsed > self.staleness_threshold()
+            if resumed_after_gap:
+                self._data_gaps.append(
+                    (self._last_push.timestamp(), now.timestamp()),
+                )
+                del self._data_gaps[:-HISTORY_GAPS_MAX]
 
         # Update internal data store, bounded: known keys always refresh,
         # but a buggy firmware emitting ever-new top-level keys cannot grow

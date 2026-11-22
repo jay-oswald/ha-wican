@@ -88,7 +88,11 @@ from .devices import (
 from .exceptions import MeatPiApiError, MeatPiWebhookError
 from .github_releases import GitHubReleasesCoordinator, hardware_stream
 from .helpers import NoPlainHttpURLError, resolve_device_webhook_urls
-from .history import async_remove_history_store, async_sync_history
+from .history import (
+    async_kept_hours_due_in,
+    async_remove_history_store,
+    async_sync_history,
+)
 from .models import MeatPiRuntimeData
 from .param_loader import async_update_params_from_github
 from .removed_webhooks import async_get_removed_webhooks, async_release_webhook_at
@@ -1209,6 +1213,10 @@ async def async_setup_entry(  # noqa: C901, PLR0915
         # capabilities.
         hass.async_create_task(_async_request_capability_probe(hass, entry))
 
+        # The hours a catch-up kept before a restart (the last hour of a
+        # drive, the device asleep since) wait on disk: book their run.
+        hass.async_create_task(_async_resume_kept_history(hass, entry))
+
         entry.async_on_unload(entry.add_update_listener(_async_entry_updated))
 
         # Contract v2: devices below the minimum firmware keep telemetry
@@ -1551,6 +1559,26 @@ async def _async_probe_capabilities(
         _schedule_history_sync(hass, entry)
 
 
+async def _async_resume_kept_history(
+    hass: HomeAssistant, entry: MeatPiConfigEntry,
+) -> None:
+    """Book the run that imports the hours a catch-up kept before a restart.
+
+    The run needs no device: it imports from the kept copy when the device
+    does not answer (history.py). Never raises.
+    """
+    try:
+        if not entry.options.get(CONF_HISTORY_SYNC, DEFAULT_HISTORY_SYNC):
+            return
+        delay = await async_kept_hours_due_in(hass, entry)
+        runtime = getattr(entry, "runtime_data", None)
+        if delay is None or runtime is None or runtime.history_followup is not None:
+            return
+        _schedule_history_followup(hass, entry, delay)
+    except Exception:  # Defensive: a kept hour must never break setup.
+        _LOGGER.exception("Unexpected error resuming the kept history hours")
+
+
 def _schedule_history_sync(hass: HomeAssistant, entry: MeatPiConfigEntry) -> None:
     """Schedule a history catch-up run if enabled, capable, and not rate-limited."""
     runtime = getattr(entry, "runtime_data", None)
@@ -1565,13 +1593,22 @@ def _schedule_history_sync(hass: HomeAssistant, entry: MeatPiConfigEntry) -> Non
         runtime.last_history_sync
         and now - runtime.last_history_sync < HISTORY_SYNC_MIN_INTERVAL
     ):
-        # Too soon after the last run (a car home again minutes after the
+        # Too soon after the last run (a car home again right after the
         # run at Home Assistant's start, a bench): book it for the end of the
-        # window instead of dropping it, unless a follow-up is already due.
-        if runtime.history_followup is None:
-            _schedule_history_followup(
-                hass, entry, HISTORY_SYNC_MIN_INTERVAL - (now - runtime.last_history_sync),
-            )
+        # window instead of dropping it. A follow-up that is booked for
+        # later than that (the hour still running, which is every hour once
+        # the device logs its battery voltage) gives way: the run at the
+        # window's end books it again. Until 2.0.0-beta1 any pending
+        # follow-up made this trigger a no-op, and the pull of a return
+        # waited for the top of the hour.
+        wait = HISTORY_SYNC_MIN_INTERVAL - (now - runtime.last_history_sync)
+        due = runtime.history_followup_due
+        if (
+            runtime.history_followup is None
+            or due is None
+            or due - time.time() > wait
+        ):
+            _schedule_history_followup(hass, entry, wait)
         return
     runtime.last_history_sync = now
     runtime.history_followups = 0
@@ -1663,6 +1700,10 @@ async def _async_request_history_sync(
             if current is None:
                 return
             current.last_history_result = result
+            if not result.ran:
+                # The device was not reached (asleep, out of range): this
+                # run does not hold back the one its next push asks for.
+                current.last_history_sync = 0.0
             if result.followup_in is not None:
                 _schedule_history_followup(hass, entry, result.followup_in)
             elif result.ran:

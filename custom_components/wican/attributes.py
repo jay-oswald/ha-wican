@@ -2,7 +2,11 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from homeassistant.components.binary_sensor import BinarySensorEntityDescription
-from homeassistant.components.sensor import SensorDeviceClass, SensorEntityDescription
+from homeassistant.components.sensor import (
+    SensorDeviceClass,
+    SensorEntityDescription,
+    SensorStateClass,
+)
 from homeassistant.const import EntityCategory
 
 
@@ -22,6 +26,10 @@ SENSOR_DESCRIPTIONS: tuple[MeatPiSensorEntityDescription, ...] = (
         key="batt_voltage",
         translation_key="batt_voltage",
         device_class=SensorDeviceClass.VOLTAGE,
+        # A measurement since 2.0.0-beta2: the catch-up imports the hours the
+        # device logged for it (firmware 6.0.0-beta.15), and Home Assistant
+        # asks for a repair of a sensor that has statistics and no state class.
+        state_class=SensorStateClass.MEASUREMENT,
         native_unit_of_measurement="V",
         suggested_display_precision=1,
         extra_attributes=[

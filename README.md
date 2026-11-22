@@ -180,6 +180,7 @@ After setup, use the integration's **Configure** button:
 |---|---|---|---|
 | **Post Interval** | 15 s | 1–3600 s | How often the device pushes data to Home Assistant. Lower values mean more frequent updates and more network traffic. |
 | **Backfill history from the device log** | on | on/off | When the device reconnects after being away, import the AutoPID data it logged to its SD card into each sensor's long-term statistics at the recorded times (see [History backfill](#history-backfill-offline-drives)). |
+| **Show the recorded drive on the History page too** | on | on/off | On: the values the device recorded while it was away are also written as states of that time, so the History page and each sensor's graph show the drive (see [Store and forward](#store-and-forward-history-catch-up-for-offline-drives)). It works on the Home Assistant versions it was tested with and switches itself off on others; the statistics are imported either way. Off: statistics only. |
 | **Keep the last values while the device is offline** | off | on/off | Off: the sensors and the location show as unavailable once the device stops sending data. On: they keep their last received value, and the Connected and Last seen sensors tell how current it is (see [How data updates work](#how-data-updates-work)). Set per device; takes effect immediately and nothing is sent to the device, so it can be changed while the car is asleep. |
 
 You can also change the device address later with the **Reconfigure** option
@@ -220,29 +221,69 @@ forward** switched on in the device's web interface (Automate > Home
 Assistant; it sets the data logger to JSON lines with every AutoPID sample,
 and it is unavailable without a usable SD card), the device keeps recording
 its vehicle parameters while it is away. When it reconnects, this
-integration notices the gap, pulls the recorded rows from the device's own
-read cursor (`GET /api/logger/export`), and imports them into each PID
-sensor's **long-term statistics** at the hours they were recorded, filling
-the gap in the long-term graphs. While it reads, the device holds off its
-sleep countdown a minute at a time (ten minutes at most), so the pull
-finishes before the car goes to sleep.
+integration notices the gap and pulls the recorded rows from the device's
+own read cursor (`GET /api/logger/export`), within seconds of the first
+push. It does two things with them:
+
+- it imports them into each sensor's **long-term statistics** at the hours
+  they were recorded (the long-term graphs, a statistics graph card, the
+  energy and statistics views), and
+- it writes the values of the time the device was away as **states** of
+  that time, so the **History** page and each sensor's own graph show the
+  drive.
+
+While it reads, the device holds off its sleep countdown a minute at a
+time (ten minutes at most), so the pull finishes before the car goes to
+sleep.
 
 What to expect:
 
-- Backfilled data appears at **hourly resolution** (mean/min/max per
-  hour). This matches Home Assistant's permanent history layer: even
+- **Statistics** appear at **hourly resolution** (mean/min/max per hour).
+  This matches Home Assistant's permanent history layer: even
   live-recorded data is reduced to hourly statistics after the recorder
   retention window (default 10 days).
-- The fine-grained history detail view and logbook stay empty for the
-  offline period (Home Assistant has no supported way to backfill raw
-  states) and automations are never retro-triggered.
-- The hour still running is imported once it has ended (a follow-up run
-  past the top of the next hour); a drive too long for one run continues
-  a minute later. The recorded hours replace the live statistics of the
-  same hour by default, because the log is the complete record of it and
-  the live pushes are samples of it (the option **Keep the live statistics
-  of hours the device also recorded** restores the old rule). Re-runs are
-  idempotent.
+- **History** shows the drive as soon as the car is home: a point whenever
+  a value changed, at most one every 10 seconds per sensor, in the unit
+  the sensor is shown in. Home Assistant has no official way to write a
+  state of the past, so the integration writes into the recorder's own
+  table. It does that only on the Home Assistant versions it was tested
+  with (recorder database version 53: Home Assistant 2026.2, 2026.10 and
+  2026.11);
+  on another version it writes no state, logs one line saying so, and the
+  statistics are imported as before. A newer Home Assistant is approved
+  through the device catalog once it has been tested, without an update
+  of the integration. The option **Show the recorded drive on the History
+  page too** turns it off. The logbook stays empty for the away time and
+  automations are never triggered by a value of the past.
+- **Units.** The device logs in its own unit (°C, km/h, kPa). The
+  integration converts every value into the unit Home Assistant keeps
+  that sensor in (°F, mph, psi on a US system) before it writes it. A
+  sensor whose two units Home Assistant cannot convert between is not
+  filled at all (the diagnostics name it). Versions before 2.0.0-beta2
+  wrote the logged number as it came: hours imported by them into a
+  sensor shown in another unit are wrong by the conversion. After the
+  update the integration reads the device's log again from its start,
+  once, and imports the hours it still holds again in the right unit
+  (only for a device that has such a sensor; a long log takes several
+  runs and may continue at the next drive). Hours the device no longer
+  holds stay as they are: delete them under Developer tools > Statistics
+  if they matter.
+- **The battery voltage.** A firmware from 6.0.0-beta.15 on records the
+  device's own battery voltage with the drive; it fills the Battery
+  Voltage sensor the same way.
+- **The last hour of a drive.** Home Assistant writes each sensor's row of
+  an hour itself, ten seconds after that hour has ended, and loses the
+  hour of every sensor when a row is there already. So an hour is
+  imported only once it has ended: the hour the car came home in follows
+  90 seconds after the next full hour, by itself. The integration keeps
+  the figures of that hour from the pull at the return, so it is imported
+  then even when the device has gone to sleep meanwhile, and imported
+  again from the device's own rows at its next wake. A drive too long for
+  one run continues a minute later. The recorded hours replace the live
+  statistics of the same hour by default, because the log is the complete
+  record of it and the live pushes are samples of it (the option **Keep
+  the live statistics of hours the device also recorded** restores the old
+  rule). Re-runs are idempotent.
 - With **Keep the last values while the device is offline** on, leave **Keep
   the live statistics of hours the device also recorded** off (the default).
   A held value keeps producing statistics while the device is away, so every
@@ -259,7 +300,10 @@ shortly after Home Assistant starts; the **Catch up history** button on
 the device page runs it on request; both can be turned off per device in
 the integration options. The diagnostics download carries the last run
 (`history_sync`: pages, rows fetched, used, deferred, hours and sensors
-imported, the cursor, the follow-up, the device's logger state).
+imported, the hours imported from the kept copy, the cursor, the
+follow-up, the device's logger state, and under `states` what the History
+fill did: whether it is active on this Home Assistant, the recorder
+database version, the states written, or the reason it wrote none).
 
 ### The GPS track (GPX)
 
