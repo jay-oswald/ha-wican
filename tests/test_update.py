@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import timedelta
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -13,10 +14,14 @@ from homeassistant.components.update import (
 )
 from homeassistant.const import ATTR_ENTITY_ID
 from homeassistant.exceptions import HomeAssistantError
+from homeassistant.util import dt as dt_util
 import pytest
-from pytest_homeassistant_custom_component.common import MockConfigEntry
+from pytest_homeassistant_custom_component.common import (
+    MockConfigEntry,
+    async_fire_time_changed,
+)
 
-from custom_components.wican.const import DOMAIN
+from custom_components.wican.const import DOMAIN, GITHUB_RELEASES_UPDATE_INTERVAL
 
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
@@ -786,3 +791,54 @@ async def test_ota_prefers_v6_route_with_legacy_fallback(
 
     assert posted[0].endswith("/api/ota/upload")
     assert posted[1].endswith("/upload/ota.bin")
+
+
+async def test_latest_version_recovers_after_failed_first_fetch(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_github_release: dict,
+) -> None:
+    """A failed GitHub fetch at setup is retried on the hourly poll.
+
+    The update entity must listen to the releases coordinator: a
+    DataUpdateCoordinator only schedules its next refresh while it has
+    listeners, so without one a single failed fetch at startup leaves
+    the latest version unknown until Home Assistant restarts.
+    """
+    mock_config_entry.add_to_hass(hass)
+
+    gateway_timeout = MagicMock()
+    gateway_timeout.raise_for_status = MagicMock(
+        side_effect=ClientResponseError(
+            request_info=MagicMock(),
+            history=(),
+            status=504,
+        ),
+    )
+    good = AsyncMock()
+    good.json = AsyncMock(return_value=[mock_github_release])
+    good.raise_for_status = MagicMock()
+    mock_get = AsyncMock(side_effect=[gateway_timeout, good])
+
+    with patch(
+        "custom_components.wican.github_releases.async_get_clientsession",
+    ) as mock_session:
+        mock_session.return_value.get = mock_get
+
+        assert await hass.config_entries.async_setup(mock_config_entry.entry_id)
+        await hass.async_block_till_done()
+
+        state = hass.states.get("update.wican_device_firmware")
+        assert state is not None
+        assert state.attributes.get("latest_version") is None
+
+        async_fire_time_changed(
+            hass,
+            dt_util.utcnow() + timedelta(seconds=GITHUB_RELEASES_UPDATE_INTERVAL + 1),
+        )
+        await hass.async_block_till_done()
+
+    assert mock_get.await_count == 2
+    state = hass.states.get("update.wican_device_firmware")
+    assert state is not None
+    assert state.attributes.get("latest_version") == "4.13"

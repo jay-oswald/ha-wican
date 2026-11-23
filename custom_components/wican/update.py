@@ -97,6 +97,21 @@ class MeatPiUpdateEntity(MeatPiEntity, UpdateEntity):
         self._github_coordinator = config_entry.runtime_data.github_coordinator
         self._update_in_progress = False
 
+    async def async_added_to_hass(self) -> None:
+        """Listen to the releases coordinator as well as the device's.
+
+        A coordinator schedules its periodic refresh only while it has
+        listeners. Without this one the releases are never fetched again
+        after setup, and a fetch that failed at setup leaves the latest
+        version unknown until Home Assistant restarts.
+        """
+        await super().async_added_to_hass()
+        self.async_on_remove(
+            self._github_coordinator.async_add_listener(
+                self._handle_coordinator_update,
+            ),
+        )
+
     def _async_handle_event(self, webhook_id: str, data: dict[str, str]) -> None:
         """Handle WiCAN webhook event.
 
