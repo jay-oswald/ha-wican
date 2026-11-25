@@ -52,6 +52,7 @@ from .const import (
     MAX_GPX_HOURS,
     SERVICE_SAVE_GPX,
     CONF_DEVICE_TYPE,
+    CONF_HELD_WEBHOOK_REV,
     CONF_HISTORY_SYNC,
     CONF_POST_INTERVAL,
     CONF_READS_PUSH_REPLY,
@@ -768,6 +769,24 @@ def _remember_reply_support(
     )
 
 
+def _remember_held_revision(
+    hass: HomeAssistant,
+    entry: MeatPiConfigEntry,
+    rev: str,
+) -> None:
+    """Keep in the entry the revision of the webhook settings the device holds.
+
+    A registration that cannot reach the device compares it with the
+    revision it would hand over: when they are the same, the device lost
+    nothing by not being reached.
+    """
+    if entry.data.get(CONF_HELD_WEBHOOK_REV) == rev:
+        return
+    hass.config_entries.async_update_entry(
+        entry, data={**entry.data, CONF_HELD_WEBHOOK_REV: rev},
+    )
+
+
 def _device_is_pushing(runtime: MeatPiRuntimeData) -> bool:
     """Return True while the device's pushes keep arriving.
 
@@ -821,6 +840,7 @@ def _reply_body(
     runtime = entry.runtime_data
     state = runtime.push_reply
     state.reported_rev = reported
+    _remember_held_revision(hass, entry, reported)
     try:
         settings = _build_webhook_payload(hass, entry, runtime.post_interval)
     except Exception as err:
@@ -904,14 +924,17 @@ def _note_registration_unreachable(
     attempts: int,
     *,
     quiet: bool,
+    holds_settings: bool,
 ) -> None:
     """Record that a registration could not reach the device, and say so.
 
     A device whose pushes keep arriving holds a webhook address that
     works, and it is handed its settings when it pushes: in the reply, or
-    by a new registration attempt. "The device will not push" would be
-    wrong for it, so only a device that is silent as well gets the error
-    and the repair issue.
+    by a new registration attempt. A device that already holds the
+    settings this registration would give it (a car asleep while Home
+    Assistant starts) pushes as soon as it wakes. "The device will not
+    push" would be wrong for both, so only a device that is silent and
+    lacks its settings gets the error and the repair issue.
     """
     runtime.registration_failed = True
     if quiet or _device_is_pushing(runtime):
@@ -919,6 +942,15 @@ def _note_registration_unreachable(
             logging.DEBUG if quiet else logging.INFO,
             "Could not reach %s to register the webhook (tried %s); it is "
             "pushing, so its settings follow when it pushes",
+            entry.title,
+            endpoints,
+        )
+        return
+    if holds_settings:
+        _LOGGER.info(
+            "Could not reach %s to register the webhook (tried %s); it "
+            "already holds these webhook settings, so it pushes when it "
+            "wakes or comes back",
             entry.title,
             endpoints,
         )
@@ -1832,9 +1864,13 @@ async def _async_register_webhook_on_device(  # noqa: C901, PLR0912, PLR0915
     # A device that reads push replies stores the revision of the settings
     # it is given and reports it back. Sent only to a device that has
     # reported one: firmware without the feature never sees the field.
+    revision = _webhook_revision(payload)
     if entry.data.get(CONF_READS_PUSH_REPLY):
-        payload = {**payload, "rev": _webhook_revision(payload)}
-    attempt_level = logging.DEBUG if quiet else logging.WARNING
+        payload = {**payload, "rev": revision}
+    # A device asleep or away that holds these settings already misses
+    # nothing: its failed attempts are no news either.
+    holds_settings = entry.data.get(CONF_HELD_WEBHOOK_REV) == revision
+    attempt_level = logging.DEBUG if quiet or holds_settings else logging.WARNING
 
     # Use HA's shared session (reuses connections)
     session = async_get_clientsession(hass)
@@ -1925,6 +1961,7 @@ async def _async_register_webhook_on_device(  # noqa: C901, PLR0912, PLR0915
                             # Clear any prior "cannot register" repair issue.
                             _clear_webhook_repair(hass, entry)
                             runtime.registration_failed = False
+                            _remember_held_revision(hass, entry, revision)
                             return True
 
                         text = await resp.text()
@@ -2003,6 +2040,7 @@ async def _async_register_webhook_on_device(  # noqa: C901, PLR0912, PLR0915
         ", ".join(str(ep) for ep in endpoints),
         max_retries,
         quiet=quiet,
+        holds_settings=holds_settings,
     )
     return False
 

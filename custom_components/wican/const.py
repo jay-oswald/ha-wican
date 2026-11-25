@@ -35,6 +35,11 @@ WEBHOOK_REV_MAX_LENGTH = 16  # what the device stores and reports
 # Entry data: the device reported a revision in its last push, so it reads
 # replies and a registration may carry "rev".
 CONF_READS_PUSH_REPLY = "reads_push_reply"
+# Entry data: the revision of the webhook settings the device holds, as the
+# last registration it accepted or its last push reported it. A device that
+# holds the settings a registration would give it loses nothing when the
+# registration cannot reach it (asleep when Home Assistant starts).
+CONF_HELD_WEBHOOK_REV = "held_webhook_rev"
 # The device decides by itself whether it trusts a reply, and Home Assistant
 # cannot see the verdict: the body for one unchanged difference is repeated
 # at most this often.
