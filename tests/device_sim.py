@@ -781,8 +781,13 @@ class MeatPiDeviceSimulator:
         options: dict[str, Any] | None = None,
         device_type: str | None = None,
         real_registration: bool = False,
+        minor_version: int = 3,
     ) -> MockConfigEntry:
         """Create the config entry and set up the integration.
+
+        ``minor_version`` is the schema the entry was written at: an older
+        one simulates an entry an earlier release made, which the
+        integration migrates as it sets it up.
 
         ``device_type`` simulates an entry created from a discovery that
         carried a device_type TXT record (new firmware); without it the
@@ -815,10 +820,8 @@ class MeatPiDeviceSimulator:
             data=data,
             options=options or {CONF_POST_INTERVAL: 15},
             unique_id=self.mac.replace(":", "").lower(),
-            # Simulated devices model current installs (schema 1.2); the
-            # migration suites cover legacy entries explicitly.
             version=1,
-            minor_version=2,
+            minor_version=minor_version,
         )
         self.entry.add_to_hass(self.hass)
 

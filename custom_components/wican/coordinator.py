@@ -179,8 +179,9 @@ class MeatPiDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if no webhook data has arrived within the staleness window, raise
         UpdateFailed so entities become unavailable (reading entities hold
         their last value instead when the keep-last-values option is on).
-        DataUpdateCoordinator logs the transition to unavailable and the
-        subsequent recovery once each (log-when-unavailable).
+        The transition to unavailable and the recovery are logged once each,
+        at info level (log-when-unavailable): a device that stops pushing is
+        usually a parked car whose adapter went to sleep, not an error.
         """
         if self._last_push is None:
             # No push received yet; stay available while waiting for the device.
@@ -189,12 +190,41 @@ class MeatPiDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         threshold = self.staleness_threshold()
         elapsed = (dt_util.utcnow() - self._last_push).total_seconds()
         if elapsed > threshold:
+            if self.last_update_success:
+                _LOGGER.info(
+                    "%s has not pushed for %.0fs (threshold %ss); it is "
+                    "asleep or away",
+                    self.config_entry.title,
+                    elapsed,
+                    threshold,
+                )
             raise UpdateFailed(
                 f"No data received from the device in {elapsed:.0f}s "
                 f"(threshold {threshold}s)",
             )
 
         return self._data
+
+    async def _async_refresh(
+        self,
+        log_failures: bool = True,  # noqa: ARG002
+        raise_on_auth_failed: bool = False,
+        scheduled: bool = False,
+        raise_on_entry_error: bool = False,
+    ) -> None:
+        """Refresh without the base class's error line for a quiet device.
+
+        The only failure of this health-check is a device that stopped
+        pushing, which _async_update_data logs at info level itself. An
+        unexpected exception is still logged by the base class whatever
+        ``log_failures`` says.
+        """
+        await super()._async_refresh(
+            False,
+            raise_on_auth_failed,
+            scheduled,
+            raise_on_entry_error,
+        )
 
     def staleness_threshold(self) -> float:
         """Return the seconds without a push after which the device is stale."""
@@ -291,6 +321,8 @@ class MeatPiDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         # Record the push time so the health-check can detect a stale device.
         self._last_push = dt_util.utcnow()
+        if not self.last_update_success:
+            _LOGGER.info("%s is pushing again", self.config_entry.title)
 
         # Notify all entities that data has been updated (also marks the
         # coordinator successful again, recovering from any stale state).

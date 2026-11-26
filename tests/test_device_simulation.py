@@ -346,6 +346,9 @@ async def _setup_entry_for_registration(hass: HomeAssistant) -> MockConfigEntry:
         data={CONF_WEBHOOK_ID: "wid_reg", "host": "http://192.168.1.5", "device_id": "d1"},
         options={CONF_POST_INTERVAL: 15},
         unique_id="regdevice",
+        # As the config flow makes an entry now.
+        version=1,
+        minor_version=3,
     )
     entry.add_to_hass(hass)
     with (

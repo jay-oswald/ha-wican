@@ -1,4 +1,9 @@
-"""Tests for config-entry migration to the device-type schema (1.1 → 1.2)."""
+"""Tests for config-entry migration.
+
+1.1 → 1.2: the device-type schema. 1.2 → 1.3: an entry made before the
+record of the webhook settings its device holds is marked as holding an
+earlier release's settings.
+"""
 
 from __future__ import annotations
 
@@ -9,7 +14,12 @@ from homeassistant.const import CONF_WEBHOOK_ID
 from homeassistant.core import HomeAssistant
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.wican.const import CONF_DEVICE_TYPE, DOMAIN
+from custom_components.wican.const import (
+    CONF_DEVICE_TYPE,
+    CONF_HELD_BY_EARLIER_RELEASE,
+    CONF_HELD_WEBHOOK_REV,
+    DOMAIN,
+)
 from custom_components.wican.devices import (
     DEVICE_TYPE_WICAN,
     DEVICE_TYPE_WICAN_PRO,
@@ -56,7 +66,7 @@ async def test_migrates_1_1_to_1_2_with_device_type(
 
     assert entry.state is ConfigEntryState.LOADED
     assert entry.version == 1
-    assert entry.minor_version == 2
+    assert entry.minor_version == 3
     assert entry.data[CONF_DEVICE_TYPE] == DEVICE_TYPE_WICAN_PRO
 
 
@@ -77,7 +87,7 @@ async def test_migrates_entry_without_hw_version(hass: HomeAssistant) -> None:
     await _setup(hass, entry)
 
     assert entry.state is ConfigEntryState.LOADED
-    assert entry.minor_version == 2
+    assert entry.minor_version == 3
     assert entry.data[CONF_DEVICE_TYPE] == DEVICE_TYPE_WICAN
 
 
@@ -130,5 +140,45 @@ async def test_current_entries_not_touched(hass: HomeAssistant) -> None:
     await _setup(hass, entry)
 
     assert entry.state is ConfigEntryState.LOADED
-    assert entry.minor_version == 2
+    assert entry.minor_version == 3
     assert entry.data[CONF_DEVICE_TYPE] == DEVICE_TYPE_WICAN
+
+
+async def test_migrates_1_2_to_1_3_marks_earlier_release_settings(
+    hass: HomeAssistant,
+) -> None:
+    """A 1.2 entry kept no record of what its device holds: it is marked so."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="WiCAN Device",
+        data=dict(_legacy_entry(device_type=DEVICE_TYPE_WICAN_PRO).data),
+        version=1,
+        minor_version=2,
+        unique_id="test_device_123",
+    )
+
+    await _setup(hass, entry)
+
+    assert entry.minor_version == 3
+    assert entry.data[CONF_HELD_BY_EARLIER_RELEASE] is True
+
+
+async def test_migrates_1_2_to_1_3_keeps_a_record(hass: HomeAssistant) -> None:
+    """A 1.2 entry that already records what its device holds is not marked."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="WiCAN Device",
+        data={
+            **_legacy_entry(device_type=DEVICE_TYPE_WICAN_PRO).data,
+            CONF_HELD_WEBHOOK_REV: "0123abcd",
+        },
+        version=1,
+        minor_version=2,
+        unique_id="test_device_123",
+    )
+
+    await _setup(hass, entry)
+
+    assert entry.minor_version == 3
+    assert CONF_HELD_BY_EARLIER_RELEASE not in entry.data
+    assert entry.data[CONF_HELD_WEBHOOK_REV] == "0123abcd"

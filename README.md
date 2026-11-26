@@ -77,9 +77,16 @@ WiCAN does not poll the vehicle from Home Assistant. Instead, the device
 
 If the device stops pushing (for example the car is parked and the adapter is in
 sleep mode), the entities are marked **unavailable** after several missed
-intervals, and become available again on the next push. A repair issue is raised
-when Home Assistant cannot reach the device to register its webhook and the
-device is not sending data either; it closes by itself with the next push.
+intervals, and become available again on the next push. Both are logged once at
+info level, not as errors. A repair issue is raised when Home Assistant cannot
+reach the device to register its webhook, the device is not sending data either,
+and it does not already hold the webhook settings it would be given (a new
+device, a changed Post Interval or Home Assistant address); it closes by itself
+with the next push. A device that holds its settings and sleeps through Home
+Assistant's start is logged at info level only: it pushes when it wakes. So is
+a device an earlier version of this integration registered, asleep at the first
+start after the upgrade: it holds that version's settings, pushes as it did
+before, and is given this version's when it next pushes.
 
 If you would rather keep seeing the last readings while the device is away, turn
 on **Keep the last values while the device is offline** for that device (see
