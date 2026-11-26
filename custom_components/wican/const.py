@@ -40,6 +40,12 @@ CONF_READS_PUSH_REPLY = "reads_push_reply"
 # holds the settings a registration would give it loses nothing when the
 # registration cannot reach it (asleep when Home Assistant starts).
 CONF_HELD_WEBHOOK_REV = "held_webhook_rev"
+# Entry data: the entry was made by a release that kept no record of the
+# settings the device holds (schema 1.2 and older). Its device holds the
+# settings that release gave it, which this one cannot compare with its own:
+# until a registration is accepted or a push reports a revision, a device
+# that cannot be reached is no more broken than it was before the upgrade.
+CONF_HELD_BY_EARLIER_RELEASE = "webhook_settings_from_earlier_release"
 # The device decides by itself whether it trusts a reply, and Home Assistant
 # cannot see the verdict: the body for one unchanged difference is repeated
 # at most this often.

@@ -52,6 +52,7 @@ from .const import (
     MAX_GPX_HOURS,
     SERVICE_SAVE_GPX,
     CONF_DEVICE_TYPE,
+    CONF_HELD_BY_EARLIER_RELEASE,
     CONF_HELD_WEBHOOK_REV,
     CONF_HISTORY_SYNC,
     CONF_POST_INTERVAL,
@@ -590,6 +591,11 @@ async def async_migrate_entry(
     1.1 → 1.2: backfill the device_type slug (brand framework). Every entry
     that predates device types is a WiCAN variant, inferred from the stored
     hardware version.
+
+    1.2 → 1.3: an entry made before the record of the webhook settings the
+    device holds is marked as holding an earlier release's settings, so a
+    device asleep at the first start on this release is not reported as one
+    that lacks its settings.
     """
     if entry.version > 1:
         # Downgrade from a future major version; cannot know the schema.
@@ -612,6 +618,15 @@ async def async_migrate_entry(
             entry.title,
             new_data[CONF_DEVICE_TYPE],
         )
+
+    if entry.minor_version < 3:
+        new_data = dict(entry.data)
+        if CONF_HELD_WEBHOOK_REV not in new_data:
+            new_data[CONF_HELD_BY_EARLIER_RELEASE] = True
+        hass.config_entries.async_update_entry(
+            entry, data=new_data, version=1, minor_version=3,
+        )
+        _LOGGER.debug("Migrated entry %s to 1.3", entry.title)
 
     return True
 
@@ -780,11 +795,15 @@ def _remember_held_revision(
     revision it would hand over: when they are the same, the device lost
     nothing by not being reached.
     """
-    if entry.data.get(CONF_HELD_WEBHOOK_REV) == rev:
+    if (
+        entry.data.get(CONF_HELD_WEBHOOK_REV) == rev
+        and CONF_HELD_BY_EARLIER_RELEASE not in entry.data
+    ):
         return
-    hass.config_entries.async_update_entry(
-        entry, data={**entry.data, CONF_HELD_WEBHOOK_REV: rev},
-    )
+    data = {**entry.data, CONF_HELD_WEBHOOK_REV: rev}
+    # What the device holds is known from now on.
+    data.pop(CONF_HELD_BY_EARLIER_RELEASE, None)
+    hass.config_entries.async_update_entry(entry, data=data)
 
 
 def _device_is_pushing(runtime: MeatPiRuntimeData) -> bool:
@@ -932,9 +951,12 @@ def _note_registration_unreachable(
     works, and it is handed its settings when it pushes: in the reply, or
     by a new registration attempt. A device that already holds the
     settings this registration would give it (a car asleep while Home
-    Assistant starts) pushes as soon as it wakes. "The device will not
-    push" would be wrong for both, so only a device that is silent and
-    lacks its settings gets the error and the repair issue.
+    Assistant starts) pushes as soon as it wakes. A device an earlier
+    release registered holds that release's settings, which upgrading the
+    integration did not change: it pushes as it did before, and is handed
+    these settings then. "The device will not push" would be wrong for
+    all three, so only a device that is silent and lacks its settings gets
+    the error and the repair issue.
     """
     runtime.registration_failed = True
     if quiet or _device_is_pushing(runtime):
@@ -951,6 +973,15 @@ def _note_registration_unreachable(
             "Could not reach %s to register the webhook (tried %s); it "
             "already holds these webhook settings, so it pushes when it "
             "wakes or comes back",
+            entry.title,
+            endpoints,
+        )
+        return
+    if entry.data.get(CONF_HELD_BY_EARLIER_RELEASE):
+        _LOGGER.info(
+            "Could not reach %s to register the webhook (tried %s); it "
+            "holds the webhook settings an earlier version of this "
+            "integration gave it, and is handed these when it next pushes",
             entry.title,
             endpoints,
         )
@@ -1870,7 +1901,11 @@ async def _async_register_webhook_on_device(  # noqa: C901, PLR0912, PLR0915
     # A device asleep or away that holds these settings already misses
     # nothing: its failed attempts are no news either.
     holds_settings = entry.data.get(CONF_HELD_WEBHOOK_REV) == revision
-    attempt_level = logging.DEBUG if quiet or holds_settings else logging.WARNING
+    held_before = bool(entry.data.get(CONF_HELD_BY_EARLIER_RELEASE))
+    attempt_level = (
+        logging.DEBUG if quiet or holds_settings or held_before
+        else logging.WARNING
+    )
 
     # Use HA's shared session (reuses connections)
     session = async_get_clientsession(hass)
@@ -2068,6 +2103,11 @@ async def _async_entry_updated(hass: HomeAssistant, entry: MeatPiConfigEntry) ->
         # info, PID definitions): nothing the device needs to hear about.
         return
     runtime.post_interval = post_interval
+    # The device lacks the new interval whatever an earlier release gave it.
+    if CONF_HELD_BY_EARLIER_RELEASE in entry.data:
+        data = dict(entry.data)
+        del data[CONF_HELD_BY_EARLIER_RELEASE]
+        hass.config_entries.async_update_entry(entry, data=data)
 
     # Re-register webhook with new interval (coalesced with any in-flight run)
     await _async_request_webhook_registration(hass, entry)

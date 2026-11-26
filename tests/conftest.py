@@ -127,6 +127,9 @@ def mock_config_entry() -> MockConfigEntry:
             CONF_POST_INTERVAL: 1000,
         },
         unique_id="wican_test-192.168.1.100:80",
+        # As the config flow makes an entry now.
+        version=1,
+        minor_version=3,
     )
 
 

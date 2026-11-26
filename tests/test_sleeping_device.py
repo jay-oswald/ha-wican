@@ -17,6 +17,12 @@ A registration that cannot reach a device holding the settings it would
 give is now logged at info level, without the repair issue; a device
 that lacks them (a first setup, a changed post interval) still gets the
 error. Going quiet and pushing again are logged once each at info level.
+
+An entry made by a release that kept no record of what the device holds
+(schema 1.2 and older) met the same at the first start after the upgrade,
+with the car parked (a WiCAN Pro upgraded from 2.0.0-beta0, 2026-11-26):
+its device holds that release's settings, and is logged at info level too
+until a push or an accepted registration records what it holds.
 """
 
 from __future__ import annotations
@@ -29,7 +35,12 @@ from homeassistant.helpers import issue_registry as ir
 import pytest
 from pytest_homeassistant_custom_component.common import async_fire_time_changed
 
-from custom_components.wican.const import CONF_POST_INTERVAL, DOMAIN
+from custom_components.wican.const import (
+    CONF_HELD_BY_EARLIER_RELEASE,
+    CONF_HELD_WEBHOOK_REV,
+    CONF_POST_INTERVAL,
+    DOMAIN,
+)
 from tests.device_sim import MeatPiDeviceSimulator
 
 if TYPE_CHECKING:
@@ -221,3 +232,76 @@ async def test_going_quiet_and_coming_back_are_info(
     assert sim.coordinator.last_update_success is True
     assert _loud(caplog) == []
     assert [m for m in _info(caplog) if "is pushing again" in m] != []
+
+
+async def test_start_while_asleep_after_an_upgrade_is_no_error(
+    hass: HomeAssistant,
+    hass_client: Any,
+    aioclient_mock: Any,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """An earlier release kept no record of what the device holds.
+
+    The device was registered and pushing under it; Home Assistant then
+    starts on this release while the car is parked (a WiCAN Pro, upgraded
+    from 2.0.0-beta0, 2026-11-26). Upgrading the integration changed
+    nothing on the device, which pushes to the address it was given when
+    it wakes, and is handed this release's settings then.
+    """
+    caplog.set_level(logging.INFO, logger="custom_components.wican")
+    sim = _device(hass, hass_client, aioclient_mock)
+    assert sim.api is not None
+    sim.api.mode = "offline"
+
+    entry = await sim.async_setup(real_registration=True, minor_version=2)
+
+    assert _loud(caplog) == []
+    assert _unreachable_issue(hass, entry) is None
+    assert any("an earlier version" in m for m in _info(caplog))
+
+
+async def test_after_an_upgrade_the_first_push_is_the_record(
+    hass: HomeAssistant,
+    hass_client: Any,
+    aioclient_mock: Any,
+    freezer: FrozenDateTimeFactory,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The car is driven: what it holds is known, the earlier release's mark goes."""
+    caplog.set_level(logging.INFO, logger="custom_components.wican")
+    sim = _device(hass, hass_client, aioclient_mock)
+    assert sim.api is not None
+    sim.api.mode = "offline"
+    entry = await sim.async_setup(real_registration=True, minor_version=2)
+    assert entry.data[CONF_HELD_BY_EARLIER_RELEASE] is True
+
+    # It wakes: its push asks for a registration, which reaches it now.
+    sim.api.mode = "online"
+    await sim.push_and_settle(sim.status())
+
+    assert CONF_HELD_BY_EARLIER_RELEASE not in entry.data
+    assert entry.data[CONF_HELD_WEBHOOK_REV]
+    entry = await _restart_while_asleep(hass, sim, freezer, caplog)
+    assert _loud(caplog) == []
+    assert any("already holds these webhook settings" in m for m in _info(caplog))
+
+
+async def test_after_an_upgrade_a_changed_interval_is_still_an_error(
+    hass: HomeAssistant,
+    hass_client: Any,
+    aioclient_mock: Any,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """An interval the earlier release never gave the device: it lacks it."""
+    sim = _device(hass, hass_client, aioclient_mock)
+    assert sim.api is not None
+    sim.api.mode = "offline"
+    entry = await sim.async_setup(real_registration=True, minor_version=2)
+    caplog.clear()
+
+    hass.config_entries.async_update_entry(entry, options={CONF_POST_INTERVAL: 30})
+    await hass.async_block_till_done()
+
+    assert CONF_HELD_BY_EARLIER_RELEASE not in entry.data
+    assert any("Failed to register webhook" in m for m in _loud(caplog))
+    assert _unreachable_issue(hass, entry) is not None
